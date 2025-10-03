@@ -16,6 +16,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.config.Track // Assuming you have this import
 import com.example.hotlapmobile.data.TrackRepo
 import com.example.hotlapmobile.util.haversineMeters
+import kotlinx.coroutines.delay
 
 @SuppressLint("MissingPermission") // Add annotation to the top-level function
 @Composable
@@ -33,9 +34,19 @@ fun RacingScreen() {
     var lastLon by remember { mutableStateOf<Double?>(null) }
     var gpsTicks by remember { mutableStateOf(0) }
 
-    // These should be near the top
+    // GPS timing
     val MAX_GPS_AGE_MS = 500L
     val MAX_GPS_ACC_M = 25f
+
+    // FLags to prevent us from multiple hitting the start/finish
+    var armed by remember { mutableStateOf(true) }      // must exit S/F to re-arm
+    var lastLapAtMs by remember { mutableStateOf(0L) }
+
+    //variables for lap timing
+    var lapStartAtMs by remember { mutableStateOf<Long?>(null) }
+    var currentLapMs by remember { mutableStateOf<Long?>(null) }
+    var bestLapMs by remember { mutableStateOf<Long?>(null) }
+
 
     DisposableEffect(track?.name) {
         val fused = com.google.android.gms.location.LocationServices
@@ -91,10 +102,30 @@ fun RacingScreen() {
                 )
                 lastDist = d
 
-                // Using track.startFinishRadiusM is more accurate here too
+                val nowMs = android.os.SystemClock.elapsedRealtime()
                 val inZone = d <= track.startFinishRadiusM
-                if (inZone && !insideSF) lap += 1   // rising edge
+
+// Re-arm when OUTSIDE S/F (keep if you added 'armed' earlier)
+                if (!inZone) armed = true
+
+// RISING EDGE + re-arm + 3s lockout (adjust if needed)
+                if (inZone && armed && !insideSF && (nowMs - lastLapAtMs) >= 3000L) {
+                    // if we were timing a lap, close it and update Best
+                    lapStartAtMs?.let { start ->
+                        val lapTime = nowMs - start
+                        if (bestLapMs == null || lapTime < bestLapMs!!) bestLapMs = lapTime
+                    }
+                    // start timing the new lap from this crossing
+                    lapStartAtMs = nowMs
+                    currentLapMs = 0L
+
+                    lap += 1
+                    lastLapAtMs = nowMs
+                    armed = false
+                }
                 insideSF = inZone
+
+
             }
         }
 
@@ -103,10 +134,22 @@ fun RacingScreen() {
     }
 
 
+            LaunchedEffect(lapStartAtMs) {
+                while (lapStartAtMs != null) {
+                    currentLapMs = android.os.SystemClock.elapsedRealtime() - lapStartAtMs!!
+                    delay(200L)
+                }
+            }
+
+
+
     // UI
     val distStr = lastDist?.let { String.format("%.1f", it) } ?: "—"
     val latStr = lastLat?.let { String.format("%.6f", it) } ?: "—"
     val lonStr = lastLon?.let { String.format("%.6f", it) } ?: "—"
+    val edgeM  = lastDist?.let { it - (track?.startFinishRadiusM ?: 0.0) }
+    val edgeStr = edgeM?.let { String.format("%.1f", it) } ?: "—"
+    val showDebug = false
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -116,11 +159,18 @@ fun RacingScreen() {
             Spacer(Modifier.height(12.dp))
             Text("Lap: $lap", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(8.dp))
-            Text("In S/F zone: $insideSF")
-            Text("Dist to S/F (m): $distStr")
-            Text("GPS: $latStr, $lonStr")
-            Text("GPS ticks: $gpsTicks")
+            Text("Current lap time: ${formatMs(currentLapMs)}")
+            Text("Best lap time: ${formatMs(bestLapMs)}")
+            /*
+                Text("In S/F zone: $insideSF")
+                Text("Dist to S/F (m): $distStr")
+                Text("GPS: $latStr, $lonStr")
+                Text("GPS ticks: $gpsTicks")
+                Text("Dist to S/F center (m): $distStr")
+                Text("Dist to S/F edge (m): $edgeStr")
+            */
 
+/*
             Spacer(Modifier.height(16.dp))
             // Indoor test helpers
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -134,6 +184,17 @@ fun RacingScreen() {
 
                 Button(onClick = { insideSF = false }) { Text("Simulate Exit S/F") }
             }
+
+            */
         }
     }
 }
+
+private fun formatMs(ms: Long?): String =
+    if (ms == null) "—" else {
+        val minutes = ms / 60_000
+        val seconds = (ms % 60_000) / 1_000
+        val hundredths = (ms % 1_000) / 10
+        String.format("%d:%02d.%02d", minutes, seconds, hundredths)
+    }
+
