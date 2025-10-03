@@ -1,4 +1,4 @@
-// app/src/main/java/com/example/hotlapmobile/ui/RaceScreen.kt
+// app/src/main/java/com/example/hotlapmobile/ui/RaceScreen_old.kt
 package com.example.hotlapmobile.ui
 
 import androidx.compose.foundation.layout.*
@@ -14,7 +14,6 @@ import com.example.hotlapmobile.config.LatLon
 import com.example.hotlapmobile.config.Track
 import com.example.hotlapmobile.config.Tracks
 import com.example.hotlapmobile.data.DriverRepo
-import com.example.hotlapmobile.ui.race.useTrainingTelemetry
 import com.example.hotlapmobile.util.haversineMeters
 import kotlin.math.roundToInt
 
@@ -174,7 +173,12 @@ private class RaceSession(
     ): Double? {
         val a = here ?: return null
         val b = fastest.getOrNull(targetCornerIdx) ?: return null
-        return haversineMeters(LatLon(a.lat, a.lon), LatLon(b.lat, b.lon))
+        val lon = 0.0
+        val lat = 0.0
+        return haversineMeters(
+            lat, lon,
+            track.startFinish.lat, track.startFinish.lon
+        )
     }
 }
 

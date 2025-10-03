@@ -131,7 +131,12 @@ fun useTrainingTelemetry(repo: DriverRepo, sessionKey: Int = 0): TrainingTelemet
                 var distanceToTarget = Double.NaN
 
                 for (i in 0 until numCorners) {
-                    val d = haversineMeters(here, repo.track.corners[i])
+                    val d = haversineMeters(
+                        here,
+                        repo.track.corners[i],
+                        track.startFinish.lat,
+                        track.startFinish.lon
+                    )
 
                     val insideTol = d < cornerTolM
                     if (insideTol) nearAnyCorner = true

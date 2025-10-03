@@ -39,7 +39,7 @@ fun AppNav() {
         composable(Routes.Settings)    { SettingsScreen() }
         composable(Routes.Race) {
             EnsureLocationPermission {
-                RaceScreen()
+                RacingScreen()
             }
         }
         composable(Routes.SelectTrack) {
