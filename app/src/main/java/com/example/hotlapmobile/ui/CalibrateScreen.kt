@@ -22,6 +22,7 @@ import com.example.hotlapmobile.data.PrefsRepo
 import kotlinx.coroutines.launch
 import kotlin.math.sqrt
 
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalibrateScreen(onBack: () -> Unit) {
@@ -47,6 +48,8 @@ fun CalibrateScreen(onBack: () -> Unit) {
     var sY by remember { mutableStateOf(0f) }
     var sZ by remember { mutableStateOf(0f) }
     val alpha = 0.20f
+
+
 
     // sample buffers
     val xs = remember { mutableStateListOf<Float>() }

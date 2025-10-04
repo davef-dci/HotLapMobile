@@ -1,23 +1,30 @@
 package com.example.hotlapmobile.ui
 
 import android.annotation.SuppressLint
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.hotlapmobile.config.Track // Assuming you have this import
+import com.example.hotlapmobile.config.Track
+import com.example.hotlapmobile.data.CalibRepo
+import com.example.hotlapmobile.data.CalibState
 import com.example.hotlapmobile.data.TrackRepo
 import com.example.hotlapmobile.util.haversineMeters
 import kotlinx.coroutines.delay
+import com.example.hotlapmobile.data.PrefsRepo
+
+
 
 @SuppressLint("MissingPermission") // Add annotation to the top-level function
 @Composable
@@ -34,6 +41,7 @@ fun RacingScreen() {
     var lastLat by remember { mutableStateOf<Double?>(null) }
     var lastLon by remember { mutableStateOf<Double?>(null) }
     var gpsTicks by remember { mutableStateOf(0) }
+
 
     // GPS timing
     val MAX_GPS_AGE_MS = 500L
@@ -53,6 +61,21 @@ fun RacingScreen() {
     var targetCornerIdx by remember(track) { mutableStateOf(0) }      // Lua: target_corner (0-based; we'll wrap)
     var distToTargetCornerM by remember { mutableStateOf(Double.NaN) } // Lua: distance_to_target_corner
 
+    var longG by remember { mutableStateOf(0f) } // placeholder; will wire sensors later
+    var emaLong by remember { mutableStateOf<Float?>(null) }
+    val emaAlpha = 0.20f   // tweak 0.1–0.3 to taste
+
+
+    val calibRepo = remember(ctx) { CalibRepo(ctx) }
+    val calibState = calibRepo.state.collectAsStateWithLifecycle(
+        initialValue = CalibState(vec = null, savedAtEpochMs = null)
+    ).value
+    val forwardVec = calibState.vec  // FloatArray?  (null until calibrated)
+
+    val prefsRepo = remember(ctx) { PrefsRepo(ctx) }
+    val brakeThreshG = prefsRepo.brakeThreshG
+        .collectAsStateWithLifecycle(initialValue = 0.2f).value
+    val gDeadband = brakeThreshG
 
     DisposableEffect(track?.name) {
         val fused = com.google.android.gms.location.LocationServices
@@ -153,8 +176,36 @@ fun RacingScreen() {
         onDispose { fused.removeLocationUpdates(callback) }
     }
 
+    DisposableEffect(forwardVec) {
+        val sm = ctx.getSystemService(android.content.Context.SENSOR_SERVICE) as SensorManager
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
 
-            LaunchedEffect(lapStartAtMs) {
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                if (e.sensor.type != Sensor.TYPE_LINEAR_ACCELERATION) return
+                val ax = e.values[0]
+                val ay = e.values[1]
+                val az = e.values[2]
+
+                // Project onto calibrated forward vector; fallback to device X if not calibrated
+                val f = forwardVec
+                val alongMs2 = if (f != null) (ax * f[0] + ay * f[1] + az * f[2]) else ax
+
+                // Convert to g's
+                val gNow = (alongMs2 / 9.80665f)
+                emaLong = if (emaLong == null) gNow else (emaAlpha * gNow + (1f - emaAlpha) * emaLong!!)
+                longG = emaLong!!
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+        if (sensor != null) sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        onDispose { sm.unregisterListener(listener) }
+    }
+
+
+
+    LaunchedEffect(lapStartAtMs) {
                 while (lapStartAtMs != null) {
                     currentLapMs = android.os.SystemClock.elapsedRealtime() - lapStartAtMs!!
                     delay(200L)
@@ -171,8 +222,28 @@ fun RacingScreen() {
     val edgeStr = edgeM?.let { String.format("%.1f", it) } ?: "—"
     val showDebug = false
 
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(24.dp))
+
+            val mag = kotlin.math.abs(longG)
+            val accelLabel = when {
+                mag < gDeadband -> "Coasting"
+                longG >= 0f -> "Accelerating"
+                else -> "Braking"
+            }
+            Text(
+                text = "$accelLabel: ${String.format("%.1f g", mag)}",
+                fontSize = 48.sp,
+                color = when (accelLabel) {
+                    "Accelerating" -> Color.Green
+                    "Braking" -> Color.Red
+                    else -> Color.Gray // Coasting
+                }
+            )
+
+
+            Spacer(Modifier.height(8.dp))
             Text("Racing Screen", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text("Track: ${track?.name ?: "— (select a track)"}")
