@@ -12,6 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.config.Track // Assuming you have this import
 import com.example.hotlapmobile.data.TrackRepo
@@ -46,6 +47,11 @@ fun RacingScreen() {
     var lapStartAtMs by remember { mutableStateOf<Long?>(null) }
     var currentLapMs by remember { mutableStateOf<Long?>(null) }
     var bestLapMs by remember { mutableStateOf<Long?>(null) }
+
+    // Corner detection (Lua parity)
+    var atCorner by remember { mutableStateOf(false) }                // Lua: at_corner
+    var targetCornerIdx by remember(track) { mutableStateOf(0) }      // Lua: target_corner (0-based; we'll wrap)
+    var distToTargetCornerM by remember { mutableStateOf(Double.NaN) } // Lua: distance_to_target_corner
 
 
     DisposableEffect(track?.name) {
@@ -125,6 +131,20 @@ fun RacingScreen() {
                 }
                 insideSF = inZone
 
+                // --- Corner logic (Lua parity) ---
+                run {
+                    val (newAtCorner, newTarget, newDistToTarget) = checkIfAtCornerLua(
+                        track = track,
+                        lat = loc.latitude,
+                        lon = loc.longitude,
+                        atCorner = atCorner,
+                        targetCornerIdx = targetCornerIdx
+                    )
+                    atCorner = newAtCorner
+                    if (newTarget != targetCornerIdx) targetCornerIdx = newTarget
+                    distToTargetCornerM = newDistToTarget
+                }
+
 
             }
         }
@@ -161,16 +181,33 @@ fun RacingScreen() {
             Spacer(Modifier.height(8.dp))
             Text("Current lap time: ${formatMs(currentLapMs)}")
             Text("Best lap time: ${formatMs(bestLapMs)}")
-            /*
+
+            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "At corner: $atCorner",
+                fontSize = 32.sp // Add this line
+            )
+            Text(
+                text = "Target corner idx: ${targetCornerIdx + 1}",
+                fontSize = 32.sp // Add this line
+            )
+            Text(
+                text = "Dist to target (m): ${
+                    if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
+                }",
+                fontSize = 32.sp // Add this line
+            )
+
+/*
                 Text("In S/F zone: $insideSF")
                 Text("Dist to S/F (m): $distStr")
                 Text("GPS: $latStr, $lonStr")
                 Text("GPS ticks: $gpsTicks")
                 Text("Dist to S/F center (m): $distStr")
                 Text("Dist to S/F edge (m): $edgeStr")
-            */
 
-/*
+
             Spacer(Modifier.height(16.dp))
             // Indoor test helpers
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -184,8 +221,7 @@ fun RacingScreen() {
 
                 Button(onClick = { insideSF = false }) { Text("Simulate Exit S/F") }
             }
-
-            */
+    */
         }
     }
 }
@@ -198,3 +234,44 @@ private fun formatMs(ms: Long?): String =
         String.format("%d:%02d.%02d", minutes, seconds, hundredths)
     }
 
+private fun checkIfAtCornerLua(
+    track: Track,
+    lat: Double,
+    lon: Double,
+    atCorner: Boolean,
+    targetCornerIdx: Int // 0-based
+): Triple<Boolean, Int, Double /*distToTarget*/> {
+
+    val tol = track.cornerToleranceM
+    val corners = track.corners
+    if (corners.isEmpty()) return Triple(false, 0, Double.NaN)
+
+    var newAtCorner = atCorner
+    var newTarget = targetCornerIdx
+    var distToTarget = Double.NaN
+
+    // for i = 1..num_corners
+    corners.forEachIndexed { i, c ->
+        val delta = haversineMeters(c.lat, c.lon, lat, lon)
+
+        // if i == target_corner then distance_to_target_corner = delta
+        if (i == newTarget) {
+            distToTarget = delta
+        }
+
+        // if delta < corner_tolerance and not at_corner then
+        if (delta < tol && !newAtCorner) {
+            newTarget = (i + 1) % corners.size   // target_corner = i + 1 (wrap)
+            newAtCorner = true                   // at_corner = true
+            return@forEachIndexed                // break
+        }
+
+        // if delta >= corner_tolerance then at_corner = false
+        if (delta >= tol) {
+            newAtCorner = false
+        }
+    }
+
+    // wrap already handled by modulo above
+    return Triple(newAtCorner, newTarget, distToTarget)
+}
