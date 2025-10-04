@@ -77,6 +77,26 @@ fun RacingScreen() {
         .collectAsStateWithLifecycle(initialValue = 0.2f).value
     val gDeadband = brakeThreshG
 
+
+    // Per-corner brake capture state (size = number of corners)
+    val cornerCount = track?.corners?.size ?: 0
+    var brakeRecorded by remember(track?.name) { mutableStateOf(MutableList(cornerCount) { false }) }
+    var brakeLat by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
+    var brakeLon by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
+    var captureMsg by remember { mutableStateOf<String?>(null) }
+
+
+// Brake detected when longitudinal g is more negative than the user-set threshold
+    val brakeDetected = longG <= -brakeThreshG
+
+// In-brake-zone when distance to the *target* corner is within track.brakeZoneDistanceM
+    val inBrakeZone = track != null &&
+            !distToTargetCornerM.isNaN() &&
+            distToTargetCornerM <= track.brakeZoneDistanceM
+
+
+
+
     DisposableEffect(track?.name) {
         val fused = com.google.android.gms.location.LocationServices
             .getFusedLocationProviderClient(ctx)
@@ -168,6 +188,27 @@ fun RacingScreen() {
                     distToTargetCornerM = newDistToTarget
                 }
 
+                // --- Brake point capture (first time per target corner) ---
+                track?.let { t ->
+                    val idx = targetCornerIdx.coerceIn(0, (t.corners.size - 1).coerceAtLeast(0))
+                    val inZoneNow = !distToTargetCornerM.isNaN() && distToTargetCornerM <= t.brakeZoneDistanceM
+
+
+                    if (
+                        inZoneNow &&
+                        longG <= -brakeThreshG &&                 // re-check with the live g here
+                        !brakeRecorded.getOrElse(idx) { false }
+                    ) {
+                        val rec = brakeRecorded.toMutableList().also { it[idx] = true }
+                        val blats = brakeLat.toMutableList().also { it[idx] = loc.latitude }
+                        val blons = brakeLon.toMutableList().also { it[idx] = loc.longitude }
+                        brakeRecorded = rec
+                        brakeLat = blats
+                        brakeLon = blons
+                    }
+                }
+
+
 
             }
         }
@@ -212,6 +253,12 @@ fun RacingScreen() {
                 }
             }
 
+    LaunchedEffect(captureMsg) {
+        if (captureMsg != null) {
+            delay(1000)
+            captureMsg = null
+        }
+    }
 
 
     // UI
@@ -223,6 +270,11 @@ fun RacingScreen() {
     val showDebug = false
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+
+
+
+
+
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(24.dp))
 
@@ -242,6 +294,37 @@ fun RacingScreen() {
                 }
             )
 
+
+
+            if (track != null) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    track.corners.forEachIndexed { i, _ ->
+                        val recorded = brakeRecorded.getOrElse(i) { false }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(text = "C${i + 1}", fontSize = 20.sp)
+                            Text(
+                                text = "●",
+                                fontSize = 40.sp, // much larger dot
+                                color = if (recorded) Color(0xFF22C55E) else Color.Gray
+                            )
+                        }
+                    }
+                }
+            }
+
+            captureMsg?.let {
+                Text(
+                    text = it,
+                    color = Color(0xFF22C55E),
+                    fontSize = 28.sp,
+                    modifier = Modifier
+                        .padding(top = 72.dp)
+                )
+            }
 
             Spacer(Modifier.height(8.dp))
             Text("Racing Screen", style = MaterialTheme.typography.headlineSmall)
@@ -268,6 +351,15 @@ fun RacingScreen() {
                     if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
                 }",
                 fontSize = 32.sp // Add this line
+            )
+
+            // Debug line (remove later if you want)
+            Text("Brake? $brakeDetected   In zone? $inBrakeZone", fontSize = 18.sp)
+
+            Text(
+                text = "Target C${targetCornerIdx + 1}  dist=${if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)} m  zone≤${String.format("%.0f", track?.brakeZoneDistanceM ?: 0.0)}  inZone=$inBrakeZone",
+                fontSize = 24.sp,
+                color = if (inBrakeZone) Color(0xFF22C55E) else Color.Gray
             )
 
 /*
