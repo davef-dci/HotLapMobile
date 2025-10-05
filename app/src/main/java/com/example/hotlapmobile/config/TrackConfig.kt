@@ -9,8 +9,8 @@ data class Track(
     val corners: List<LatLon>,
     // track-wide parameters
     val cornerToleranceM: Double = 20.0,
-    val brakeZoneDistanceM: Double = 100.0,
-    val brakeWarnDistanceM: Double = 200.0
+    val brakeZoneDistanceM: Double = 150.0,
+    val brakeWarnDistanceM: Double = 120.0
 )
 
 object Tracks {
@@ -24,8 +24,8 @@ object Tracks {
             LatLon(43.044651, -89.444843)  // C3
         ),
         cornerToleranceM = 20.0,
-        brakeZoneDistanceM = 100.0,
-        brakeWarnDistanceM = 150.0
+        brakeZoneDistanceM = 150.0,
+        brakeWarnDistanceM = 120.0
     )
 
     // NEW: Kent Kallsen Demo Track
@@ -40,8 +40,8 @@ object Tracks {
             LatLon(42.897930, -89.131966)    // C4
         ),
         cornerToleranceM = 25.0,             // tweak per feel; 20–30m is typical
-        brakeZoneDistanceM = 120.0,          // begin looking for braking
-        brakeWarnDistanceM = 180.0           // start 6→!Brake! countdown
+        brakeZoneDistanceM = 150.0,          // begin looking for braking
+        brakeWarnDistanceM = 120.0           // start 6→!Brake! countdown
     )
 
     val all = listOf(

@@ -23,6 +23,11 @@ import com.example.hotlapmobile.data.TrackRepo
 import com.example.hotlapmobile.util.haversineMeters
 import kotlinx.coroutines.delay
 import com.example.hotlapmobile.data.PrefsRepo
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+
+
 
 
 
@@ -85,6 +90,11 @@ fun RacingScreen() {
     var brakeLon by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
     var captureMsg by remember { mutableStateOf<String?>(null) }
 
+    // Per-corner brake points for the *fastest lap*
+    var bestBrakeLat by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
+    var bestBrakeLon by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
+
+
 
 // Brake detected when longitudinal g is more negative than the user-set threshold
     val brakeDetected = longG <= -brakeThreshG
@@ -94,7 +104,9 @@ fun RacingScreen() {
             !distToTargetCornerM.isNaN() &&
             distToTargetCornerM <= track.brakeZoneDistanceM
 
-
+    var distToBestBrakeM by remember { mutableStateOf(Double.NaN) }
+    var prevDistToBestBrakeM by remember { mutableStateOf<Double?>(null) }
+    var approachingBrake by remember { mutableStateOf(false) }
 
 
     DisposableEffect(track?.name) {
@@ -162,11 +174,39 @@ fun RacingScreen() {
                     // if we were timing a lap, close it and update Best
                     lapStartAtMs?.let { start ->
                         val lapTime = nowMs - start
-                        if (bestLapMs == null || lapTime < bestLapMs!!) bestLapMs = lapTime
+                        if (bestLapMs == null || lapTime < bestLapMs!!) {
+                            bestLapMs = lapTime
+
+                            // Copy current-lap brake points into best-lap arrays where present
+                            val newBestLat = bestBrakeLat.toMutableList()
+                            val newBestLon = bestBrakeLon.toMutableList()
+                            for (i in 0 until cornerCount) {
+                                val latVal = brakeLat.getOrElse(i) { null }
+                                val lonVal = brakeLon.getOrElse(i) { null }
+                                if (latVal != null && lonVal != null) {
+                                    newBestLat[i] = latVal
+                                    newBestLon[i] = lonVal
+                                }
+                            }
+                            bestBrakeLat = newBestLat
+                            bestBrakeLon = newBestLon
+                        }
                     }
+
+
+
                     // start timing the new lap from this crossing
                     lapStartAtMs = nowMs
                     currentLapMs = 0L
+
+                    // Reset current-lap brake capture for the new lap
+                    track?.let { t ->
+                        val n = t.corners.size
+                        brakeRecorded = MutableList(n) { false }
+                        brakeLat = MutableList<Double?>(n) { null }
+                        brakeLon = MutableList<Double?>(n) { null }
+                    }
+
 
                     lap += 1
                     lastLapAtMs = nowMs
@@ -187,6 +227,27 @@ fun RacingScreen() {
                     if (newTarget != targetCornerIdx) targetCornerIdx = newTarget
                     distToTargetCornerM = newDistToTarget
                 }
+
+                // --- Distance to fastest-lap brake point for current target corner ---
+                track?.let { t ->
+                    val idx = targetCornerIdx.coerceIn(0, (t.corners.size - 1).coerceAtLeast(0))
+                    val latBP = bestBrakeLat.getOrElse(idx) { null }
+                    val lonBP = bestBrakeLon.getOrElse(idx) { null }
+
+                    if (latBP != null && lonBP != null) {
+                        val dNow = haversineMeters(latBP, lonBP, loc.latitude, loc.longitude)
+                        // update approaching/prev
+                        prevDistToBestBrakeM?.let { prev -> approachingBrake = dNow < prev }
+                        distToBestBrakeM = dNow
+                        prevDistToBestBrakeM = dNow
+                    } else {
+                        // no brake point saved for this corner yet
+                        distToBestBrakeM = Double.NaN
+                        prevDistToBestBrakeM = null
+                        approachingBrake = false
+                    }
+                }
+
 
                 // --- Brake point capture (first time per target corner) ---
                 track?.let { t ->
@@ -260,6 +321,13 @@ fun RacingScreen() {
         }
     }
 
+    LaunchedEffect(targetCornerIdx) {
+        // New target corner: clear approach history so countdown logic starts clean
+        prevDistToBestBrakeM = null
+        distToBestBrakeM = Double.NaN
+        approachingBrake = false
+    }
+
 
     // UI
     val distStr = lastDist?.let { String.format("%.1f", it) } ?: "—"
@@ -316,6 +384,38 @@ fun RacingScreen() {
                 }
             }
 
+// ---- Brake countdown (6..0 with color-coded circle) ----
+            if (track != null) {
+                val warn = track.brakeWarnDistanceM         // e.g., 200 m
+                val zeroEps = 5.0                           // show "0" within 5 m of the brake point
+
+                val view = computeCountdownView(
+                    distToBestBrakeM = distToBestBrakeM,
+                    warnM = warn,
+                    zeroEpsM = zeroEps,
+                    approachingBrake = approachingBrake
+                )
+
+                Spacer(Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .size(220.dp)
+                        .background(view.circleColor, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (view.visible) {
+                        Text(
+                            text = view.stage.toString(),  // 6..0
+                            fontSize = 96.sp,
+                            color = view.textColor
+                        )
+                    }
+                }
+            }
+
+
+
+
             captureMsg?.let {
                 Text(
                     text = it,
@@ -330,27 +430,25 @@ fun RacingScreen() {
             Text("Racing Screen", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text("Track: ${track?.name ?: "— (select a track)"}")
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             Text("Lap: $lap", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(8.dp))
             Text("Current lap time: ${formatMs(currentLapMs)}")
             Text("Best lap time: ${formatMs(bestLapMs)}")
-
-            Spacer(Modifier.height(8.dp))
             Spacer(Modifier.height(8.dp))
             Text(
                 text = "At corner: $atCorner",
-                fontSize = 32.sp // Add this line
+                fontSize = 12.sp // Add this line
             )
             Text(
                 text = "Target corner idx: ${targetCornerIdx + 1}",
-                fontSize = 32.sp // Add this line
+                fontSize = 12.sp // Add this line
             )
             Text(
                 text = "Dist to target (m): ${
                     if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
                 }",
-                fontSize = 32.sp // Add this line
+                fontSize = 12.sp // Add this line
             )
 
             // Debug line (remove later if you want)
@@ -358,33 +456,83 @@ fun RacingScreen() {
 
             Text(
                 text = "Target C${targetCornerIdx + 1}  dist=${if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)} m  zone≤${String.format("%.0f", track?.brakeZoneDistanceM ?: 0.0)}  inZone=$inBrakeZone",
-                fontSize = 24.sp,
+                fontSize = 12.sp,
                 color = if (inBrakeZone) Color(0xFF22C55E) else Color.Gray
             )
 
-/*
-                Text("In S/F zone: $insideSF")
-                Text("Dist to S/F (m): $distStr")
-                Text("GPS: $latStr, $lonStr")
-                Text("GPS ticks: $gpsTicks")
-                Text("Dist to S/F center (m): $distStr")
-                Text("Dist to S/F edge (m): $edgeStr")
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "DBG  lap=$lap  bestLap=${formatMs(bestLapMs)}  curLap=${formatMs(currentLapMs)}",
+                    fontSize = 18.sp,
+                    color = Color.LightGray
+                )
+
+                Text(
+                    text = "Target C${targetCornerIdx + 1} | distToTarget=${
+                        if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
+                    } m | inZone=${track?.let { !distToTargetCornerM.isNaN() && distToTargetCornerM <= it.brakeZoneDistanceM } ?: false}",
+                    fontSize = 18.sp,
+                    color = Color.LightGray
+                )
+
+                Text(
+                    text = "BestBrake dist=${
+                        if (distToBestBrakeM.isNaN()) "—" else String.format("%.1f", distToBestBrakeM)
+                    } m  haveBest=${!distToBestBrakeM.isNaN()}  approaching=$approachingBrake",
+                    fontSize = 18.sp,
+                    color = Color.LightGray
+                )
 
 
-            Spacer(Modifier.height(16.dp))
-            // Indoor test helpers
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = {
-                    // Simulate entering S/F (rising edge)
-                    if (!insideSF) {
-                        insideSF = true
-                        lap += 1
-                    }
-                }) { Text("Simulate Enter S/F") }
 
-                Button(onClick = { insideSF = false }) { Text("Simulate Exit S/F") }
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    text = "CD vis=${!distToBestBrakeM.isNaN() && distToBestBrakeM <= (track?.brakeWarnDistanceM ?: Double.MAX_VALUE) && (approachingBrake || (!distToBestBrakeM.isNaN() && distToBestBrakeM <= (track?.brakeZoneDistanceM ?: 0.0)))}  distBest=${if (distToBestBrakeM.isNaN()) "—" else String.format("%.1f", distToBestBrakeM)}  approaching=$approachingBrake",
+                    fontSize = 18.sp,
+                    color = Color.LightGray
+                )
+
+
+
+                Text(
+                    text = "G=${String.format("%.2f", longG)}  brakeThresh=${String.format("%.2f", brakeThreshG)}  brakeDetected=${longG <= -brakeThreshG}",
+                    fontSize = 18.sp,
+                    color = Color.LightGray
+                )
+
+
             }
-    */
+
+
+            /*
+                            Text("In S/F zone: $insideSF")
+                            Text("Dist to S/F (m): $distStr")
+                            Text("GPS: $latStr, $lonStr")
+                            Text("GPS ticks: $gpsTicks")
+                            Text("Dist to S/F center (m): $distStr")
+                            Text("Dist to S/F edge (m): $edgeStr")
+
+
+                        Spacer(Modifier.height(16.dp))
+                        // Indoor test helpers
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(onClick = {
+                                // Simulate entering S/F (rising edge)
+                                if (!insideSF) {
+                                    insideSF = true
+                                    lap += 1
+                                }
+                            }) { Text("Simulate Enter S/F") }
+
+                            Button(onClick = { insideSF = false }) { Text("Simulate Exit S/F") }
+                        }
+                */
         }
     }
 }
@@ -397,44 +545,86 @@ private fun formatMs(ms: Long?): String =
         String.format("%d:%02d.%02d", minutes, seconds, hundredths)
     }
 
+private data class CountdownView(
+    val visible: Boolean,
+    val stage: Int,          // 6..0 when visible
+    val circleColor: Color,
+    val textColor: Color
+)
+
+private fun computeCountdownView(
+    distToBestBrakeM: Double,
+    warnM: Double,          // e.g., 200 m
+    zeroEpsM: Double,       // e.g., 5 m  (only show 0 inside this)
+    approachingBrake: Boolean
+): CountdownView {
+    val haveBest = !distToBestBrakeM.isNaN()
+    val inWarn = haveBest && distToBestBrakeM <= warnM
+    val atPoint = haveBest && distToBestBrakeM <= zeroEpsM
+
+    // Show only when inside warn AND (approaching OR at/near brake point)
+    val visible = inWarn && (approachingBrake || atPoint)
+    if (!visible) {
+        return CountdownView(
+            visible = false,
+            stage = -1,
+            circleColor = Color(0xFF444444), // gray puck
+            textColor = Color(0xFFB0B0B0)
+        )
+    }
+
+    val stage = if (atPoint) 0
+    else {
+        // Map distance in (0..warn] to 1..6 (6 at warn, 1 near the point)
+        kotlin.math.ceil((distToBestBrakeM / warnM) * 6.0)
+            .toInt()
+            .coerceIn(1, 6)
+    }
+
+    val circle = when (stage) {
+        6, 5, 4 -> Color(0xFF22C55E)  // Green
+        3, 2, 1 -> Color(0xFFFFC107)  // Yellow
+        0       -> Color(0xFFEF4444)  // Red
+        else    -> Color(0xFF444444)
+    }
+
+    return CountdownView(
+        visible = true,
+        stage = stage,
+        circleColor = circle,
+        textColor = Color.White
+    )
+}
+
+
+
 private fun checkIfAtCornerLua(
     track: Track,
     lat: Double,
     lon: Double,
     atCorner: Boolean,
-    targetCornerIdx: Int // 0-based
-): Triple<Boolean, Int, Double /*distToTarget*/> {
+    targetCornerIdx: Int
+): Triple<Boolean, Int, Double> {
 
     val tol = track.cornerToleranceM
     val corners = track.corners
     if (corners.isEmpty()) return Triple(false, 0, Double.NaN)
 
-    var newAtCorner = atCorner
-    var newTarget = targetCornerIdx
     var distToTarget = Double.NaN
+    var nearIdx = -1
 
-    // for i = 1..num_corners
     corners.forEachIndexed { i, c ->
         val delta = haversineMeters(c.lat, c.lon, lat, lon)
-
-        // if i == target_corner then distance_to_target_corner = delta
-        if (i == newTarget) {
-            distToTarget = delta
-        }
-
-        // if delta < corner_tolerance and not at_corner then
-        if (delta < tol && !newAtCorner) {
-            newTarget = (i + 1) % corners.size   // target_corner = i + 1 (wrap)
-            newAtCorner = true                   // at_corner = true
-            return@forEachIndexed                // break
-        }
-
-        // if delta >= corner_tolerance then at_corner = false
-        if (delta >= tol) {
-            newAtCorner = false
-        }
+        if (i == targetCornerIdx) distToTarget = delta
+        if (delta < tol) nearIdx = i
     }
 
-    // wrap already handled by modulo above
-    return Triple(newAtCorner, newTarget, distToTarget)
+    val nowAtCorner = (nearIdx != -1)
+
+    val nextTarget =
+        if (!atCorner && nowAtCorner) (nearIdx + 1) % corners.size
+        else targetCornerIdx
+
+    return Triple(nowAtCorner, nextTarget, distToTarget)
 }
+
