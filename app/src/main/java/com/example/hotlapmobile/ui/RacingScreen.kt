@@ -161,7 +161,12 @@ data class WorldState(
     val currentLapStartMs: Long? = null,
     val currentLapElapsedMs: Long? = null,
     val bestLapMs: Long? = null,
-    val lastSfEnterMs: Long? = null
+    val lastSfEnterMs: Long? = null,
+
+    // --- Corner detection (Lua parity) ---
+    val atCorner: Boolean = false,
+    val targetCornerIdx: Int = 0,          // 0-based
+    val distToTargetCornerM: Double? = null
 )
 
 
@@ -270,17 +275,10 @@ fun RacingScreen() {
     LaunchedEffect(Unit) {
         while (true) {
             world.value = checkIfAtStartFinish(latest.value, world.value, track) // check if at start finish
-
+            world.value = updateCornerState(latest.value, world.value, track)
             phase = detectDrivePhase(latest.value.longG, brakeThreshG) // check if accelerating or braking
-
             ticks++
-
-
-
             delay(100L)
-
-
-
         }
     }
 
@@ -339,6 +337,7 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
             verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Text(text = "Target Corner: ${world.targetCornerIdx+1}", fontSize = 32.sp)
             Text(text = "Current Lap: ${formatMs(world.currentLapElapsedMs)}", fontSize = 32.sp)
             Text(text = "Best: ${formatMs(world.bestLapMs)}", fontSize = 28.sp)
             Text(text = "Lap: ${world.lapCount}", fontSize = 22.sp)
@@ -404,6 +403,11 @@ private fun DebugUi(
             color = Color.Gray,
             fontSize = 16.sp
         )
+
+        Text("Target corner: ${world.targetCornerIdx+1}")
+        Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
+        Text("At corner: ${world.atCorner}")
+
     }
 }
 
@@ -546,6 +550,77 @@ private fun isEnteringAllowed(world: WorldState, now: Long = android.os.SystemCl
     return (now - last) >= COOLDOWN_MS
 }
 
+//update the corner
+private fun updateCornerState(
+    latest: LatestInputs,
+    world: WorldState,
+    track: Track
+): WorldState {
+    val fix = latest.gps ?: return world  // no GPS yet
+
+    val (atC, nextIdx, distM) = checkIfAtCornerLua(
+        track = track,
+        lat = fix.lat,
+        lon = fix.lon,
+        atCorner = world.atCorner,
+        targetCornerIdx = world.targetCornerIdx
+    )
+
+    return world.copy(
+        atCorner = atC,
+        targetCornerIdx = nextIdx,
+        distToTargetCornerM = distM
+    )
+}
+
+
+
+
+//Lua-parity: check_if_at_corner()
+
+
+
+private fun checkIfAtCornerLua(
+    track: Track,
+    lat: Double,
+    lon: Double,
+    atCorner: Boolean,
+    targetCornerIdx: Int // 0-based
+): Triple<Boolean, Int, Double> {
+
+    val tol = track.cornerToleranceM
+    val corners = track.corners
+    if (corners.isEmpty()) return Triple(false, 0, Double.NaN)
+
+    var newAtCorner = atCorner
+    var newTarget = targetCornerIdx
+    var distToTarget = Double.NaN
+
+    corners.forEachIndexed { i, c ->
+        val delta = haversineMeters(c.lat, c.lon, lat, lon)
+
+        // if i == target_corner then set distance to target corner
+        if (i == newTarget) {
+            distToTarget = delta
+        }
+
+        // if delta < tol and not at_corner then we "hit" this corner -> advance target
+        if (delta < tol && !newAtCorner) {
+            newTarget = (i + 1) % corners.size
+            newAtCorner = true
+            return@forEachIndexed // break
+        }
+
+        // if delta >= tol then we are not at a corner (clears the latch once we leave)
+        if (delta >= tol) {
+            newAtCorner = false
+        }
+    }
+
+    return Triple(newAtCorner, newTarget, distToTarget)
+}
+
+
 
 private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
     val g = longG ?: return DrivePhase.UNKNOWN
@@ -631,3 +706,5 @@ private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
         )
     }
 }
+
+
