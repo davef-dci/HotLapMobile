@@ -29,6 +29,10 @@ import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 import com.example.hotlapmobile.data.PrefsRepo
 import kotlin.math.sqrt
+import kotlin.math.exp  // for time-aware EMA alpha
+import kotlin.math.min
+
+
 import com.example.hotlapmobile.data.CalibRepo
 import com.example.hotlapmobile.data.CalibState
 import androidx.compose.foundation.background
@@ -59,6 +63,12 @@ enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
 private fun AccelProducer(latest: MutableState<LatestInputs>) {
     val ctx = LocalContext.current
 
+// --- EMA smoothing state ---
+// Remember previous smoothed value (g) so we can apply low-pass filtering
+    var emaG by remember { mutableStateOf<Float?>(null) }
+
+// Remember previous sensor timestamp (ns) to make the smoothing time-aware
+    var lastTsNs by remember { mutableStateOf<Long?>(null) }
 
 
     // read the calibrated forward unit vector (falls back to +X if not set)
@@ -75,12 +85,11 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
     }
 
 
-    DisposableEffect(Unit) {
+    DisposableEffect(fx, fy, fz) {
         val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val lin = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
 
         if (lin == null) {
-            // Device has no linear-accel sensor; clear value
             latest.value = latest.value.copy(longG = null)
             return@DisposableEffect onDispose { }
         }
@@ -88,17 +97,38 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
                 if (e.sensor.type != Sensor.TYPE_LINEAR_ACCELERATION) return
-                // Proejct acceleation onto the calibrated X axis
-                val ax = e.values[0]           // m/s² along +X
-                val ay = e.values[1]           // m/s² along +Y
-                val az = e.values[2]           // m/s² along +Z
 
+                // 1) Read device linear acceleration in m/s²
+                val ax = e.values[0]
+                val ay = e.values[1]
+                val az = e.values[2]
+
+                // 2) Project onto calibrated forward axis
                 val projMs2 = fx * ax + fy * ay + fz * az
                 val gProj = projMs2 / ONE_G
-                latest.value = latest.value.copy(longG = gProj)
 
+                // 3) Time-aware EMA smoothing + clamp + deadband
+                val nowNs = e.timestamp                        // sensor monotonic ns
+                val last = lastTsNs                            // previous ns
+                val gRaw = gProj.coerceIn(-G_CLAMP, G_CLAMP)   // guard against spikes
+                val dtMs = if (last != null) (nowNs - last) / 1_000_000f else 0f
+                lastTsNs = nowNs
 
+                // alpha from time constant TAU_MS
+                val alpha = if (dtMs > 0f) (1f - exp(-dtMs / TAU_MS)) else 1f
+
+                // first sample uses raw; thereafter blend
+                val emaPrev = emaG ?: gRaw
+                val emaNow = emaPrev + alpha * (gRaw - emaPrev)
+                emaG = emaNow
+
+                // deadband around zero for coast stability
+                val gSmooth = if (kotlin.math.abs(emaNow) < DEAD_BAND_G) 0f else emaNow
+
+                // 4) Publish smoothed g
+                latest.value = latest.value.copy(longG = gSmooth)
             }
+
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
@@ -138,6 +168,14 @@ data class WorldState(
 //helpers to convert sensor readings to g's and project acceleration onto calibrated forward axis.
 
 private const val ONE_G = 9.80665f   // conversion from m/s² → g
+// --- Longitudinal g smoothing (EMA) ---
+// Max believable g before smoothing (guards against IMU spikes)
+private const val G_CLAMP = 1.8f
+// Low-pass time constant in milliseconds (lower = snappier, higher = smoother)
+private const val TAU_MS = 300f
+// Deadband around zero after smoothing to keep “coast” steady
+private const val DEAD_BAND_G = 0.02f
+
 
 private fun dot3(a: FloatArray, x: Float, y: Float, z: Float): Float {
     return a[0] * x + a[1] * y + a[2] * z
@@ -376,7 +414,7 @@ private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .width(90.dp)            // wider
-            .height(120.dp)          // taller gray band
+            .height(40.dp)          // taller gray band
             .background(Color(0xFFD9D9D9), RoundedCornerShape(10.dp))
             .padding(4.dp),
         contentAlignment = Alignment.Center
@@ -522,6 +560,7 @@ private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
 private fun GArrowBar(
     g: Float,
     maxAbs: Float = 1.5f,
+    gain: Float = 2.0f,
     modifier: Modifier = Modifier
 ) {
     Canvas(
@@ -535,7 +574,7 @@ private fun GArrowBar(
 
         val deadband = 0.02f
         val clamped = g.coerceIn(-maxAbs, maxAbs)
-        val frac = abs(clamped) / maxAbs
+        val frac = min((kotlin.math.abs(clamped) / maxAbs) * gain, 1f)
 
         // color by direction
         val barColor = when {
@@ -574,7 +613,7 @@ private fun GArrowBar(
 private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
     Box(
         modifier = Modifier
-            .width(110.dp)
+            .width(100.dp)
             .height(220.dp)
     ) {
         // BACK: vertical bar
