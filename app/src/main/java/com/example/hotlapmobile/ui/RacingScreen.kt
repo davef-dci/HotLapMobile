@@ -1,630 +1,355 @@
 package com.example.hotlapmobile.ui
 
-import android.annotation.SuppressLint
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.hotlapmobile.config.Track
-import com.example.hotlapmobile.data.CalibRepo
-import com.example.hotlapmobile.data.CalibState
-import com.example.hotlapmobile.data.TrackRepo
-import com.example.hotlapmobile.util.haversineMeters
 import kotlinx.coroutines.delay
-import com.example.hotlapmobile.data.PrefsRepo
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.unit.dp
+/* STEP: Import track config + distance helper */
+import com.example.hotlapmobile.config.Track
+import com.example.hotlapmobile.config.Tracks
+import com.example.hotlapmobile.util.haversineMeters
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.hotlapmobile.data.TrackRepo
+import androidx.compose.ui.platform.LocalContext
 
 
+// Hold one GPS reading (latitude, longitude) with a monotonic time tag (tMillis).
+data class GpsFix(
+    val lat: Double,
+    val lon: Double,
+    val tMillis: Long  // from android.os.SystemClock.elapsedRealtime()
+)
+
+ //LatestInputs holds the most recent sensor readings we care about.
+data class LatestInputs(
+    val gps: GpsFix? = null
+)
 
 
+//Prepare fields we'll need for S/F detection and lap counting.
+data class WorldState(
+    val lapCount: Int = 0,
+    val distToStartM: Double? = null,
+    val inStartZone: Boolean = false,
+    val wasInStartZone: Boolean = false,
 
-@SuppressLint("MissingPermission") // Add annotation to the top-level function
+    // --- Lap timing ---
+    val currentLapStartMs: Long? = null,
+    val currentLapElapsedMs: Long? = null,
+    val bestLapMs: Long? = null,
+    val lastSfEnterMs: Long? = null
+)
+
+
 @Composable
-fun RacingScreen() {
-    val ctx = LocalContext.current
+fun rememberWorldState(): MutableState<WorldState> =
+    remember { mutableStateOf(WorldState()) }
 
-    // Pull the selected track from your existing DataStore-backed repo
-    val trackRepo = remember(ctx) { TrackRepo(ctx) }
-    val track = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
+/* GPS Producer - publish latest GPS fix into the mailbox.
+ *
+ * - Subscribe to fused location updates.
+ * - On each new Android Location, write a GpsFix(lat, lon, tMillis) into LatestInputs.
+ * - Avoid any racing logic here; this is a "dumb" data publisher.
+ *
+ * Notes:
+ * - Requires location permission already granted (ACCESS_FINE/COARSE).
+ * - Uses a relatively fast request interval (200 ms). The 10 Hz loop will decide what to do.
+ * - Uses SystemClock.elapsedRealtime() for a monotonic timestamp (safe for age calculations).
+ */
+@android.annotation.SuppressLint("MissingPermission")
+@Composable
+private fun GpsProducer(latest: MutableState<LatestInputs>) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
 
-    var lap by remember { mutableStateOf(0) }
-    var insideSF by remember { mutableStateOf(false) } // start/finish zone flag
-    var lastDist by remember { mutableStateOf<Double?>(null) }
-    var lastLat by remember { mutableStateOf<Double?>(null) }
-    var lastLon by remember { mutableStateOf<Double?>(null) }
-    var gpsTicks by remember { mutableStateOf(0) }
-
-
-    // GPS timing
-    val MAX_GPS_AGE_MS = 500L
-    val MAX_GPS_ACC_M = 25f
-
-    // FLags to prevent us from multiple hitting the start/finish
-    var armed by remember { mutableStateOf(true) }      // must exit S/F to re-arm
-    var lastLapAtMs by remember { mutableStateOf(0L) }
-
-    //variables for lap timing
-    var lapStartAtMs by remember { mutableStateOf<Long?>(null) }
-    var currentLapMs by remember { mutableStateOf<Long?>(null) }
-    var bestLapMs by remember { mutableStateOf<Long?>(null) }
-
-    // Corner detection (Lua parity)
-    var atCorner by remember { mutableStateOf(false) }                // Lua: at_corner
-    var targetCornerIdx by remember(track) { mutableStateOf(0) }      // Lua: target_corner (0-based; we'll wrap)
-    var distToTargetCornerM by remember { mutableStateOf(Double.NaN) } // Lua: distance_to_target_corner
-
-    var longG by remember { mutableStateOf(0f) } // placeholder; will wire sensors later
-    var emaLong by remember { mutableStateOf<Float?>(null) }
-    val emaAlpha = 0.20f   // tweak 0.1–0.3 to taste
-
-
-    val calibRepo = remember(ctx) { CalibRepo(ctx) }
-    val calibState = calibRepo.state.collectAsStateWithLifecycle(
-        initialValue = CalibState(vec = null, savedAtEpochMs = null)
-    ).value
-    val forwardVec = calibState.vec  // FloatArray?  (null until calibrated)
-
-    val prefsRepo = remember(ctx) { PrefsRepo(ctx) }
-    val brakeThreshG = prefsRepo.brakeThreshG
-        .collectAsStateWithLifecycle(initialValue = 0.2f).value
-    val gDeadband = brakeThreshG
-
-
-    // Per-corner brake capture state (size = number of corners)
-    val cornerCount = track?.corners?.size ?: 0
-    var brakeRecorded by remember(track?.name) { mutableStateOf(MutableList(cornerCount) { false }) }
-    var brakeLat by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
-    var brakeLon by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
-    var captureMsg by remember { mutableStateOf<String?>(null) }
-
-    // Per-corner brake points for the *fastest lap*
-    var bestBrakeLat by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
-    var bestBrakeLon by remember(track?.name) { mutableStateOf(MutableList<Double?>(cornerCount) { null }) }
-
-
-
-// Brake detected when longitudinal g is more negative than the user-set threshold
-    val brakeDetected = longG <= -brakeThreshG
-
-// In-brake-zone when distance to the *target* corner is within track.brakeZoneDistanceM
-    val inBrakeZone = track != null &&
-            !distToTargetCornerM.isNaN() &&
-            distToTargetCornerM <= track.brakeZoneDistanceM
-
-    var distToBestBrakeM by remember { mutableStateOf(Double.NaN) }
-    var prevDistToBestBrakeM by remember { mutableStateOf<Double?>(null) }
-    var approachingBrake by remember { mutableStateOf(false) }
-
-
-    DisposableEffect(track?.name) {
+    DisposableEffect(Unit) {
         val fused = com.google.android.gms.location.LocationServices
             .getFusedLocationProviderClient(ctx)
 
-        // seed from last known (if any)
-        fun seedFromLastKnown(loc: android.location.Location) {
-            val lat = loc.latitude
-            val lon = loc.longitude
-            lastLat = lat
-            lastLon = lon
-
-            track?.let {
-                val d = haversineMeters(lat, lon, it.startFinish.lat, it.startFinish.lon)
-                lastDist = d
-                // Using track.startFinishRadiusM is more accurate than cornerToleranceM
-                val inZone = d <= it.startFinishRadiusM
-                if (inZone && !insideSF) lap += 1
-                insideSF = inZone
-            }
-        }
-
-        fused.lastLocation.addOnSuccessListener { loc ->
-            if (loc != null) seedFromLastKnown(loc)
-        }
-
-        // live updates (200 ms like your working code)
         val req = com.google.android.gms.location.LocationRequest.Builder(
             com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
-            200L
+            200L // request ~5 Hz; Android will coalesce as needed
         ).setMinUpdateIntervalMillis(200L).build()
 
-        val callback = object : com.google.android.gms.location.LocationCallback() {
-            override fun onLocationResult(result: com.google.android.gms.location.LocationResult) {
-                val loc = result.lastLocation ?: return
-
-                val accM = loc.accuracy
-                val ageMs = ((android.os.SystemClock.elapsedRealtimeNanos() - loc.elapsedRealtimeNanos) / 1_000_000L)
-                    .coerceAtLeast(0L)
-                val fresh = (accM <= MAX_GPS_ACC_M) && (ageMs <= MAX_GPS_AGE_MS)
-
-                // always show something, even if stale
-                lastLat = loc.latitude
-                lastLon = loc.longitude
-
-                gpsTicks += 1
-
-                if (!fresh || track == null) return
-
-                val d = haversineMeters(
-                    loc.latitude, loc.longitude,
-                    track.startFinish.lat, track.startFinish.lon
-                )
-                lastDist = d
-
-                val nowMs = android.os.SystemClock.elapsedRealtime()
-                val inZone = d <= track.startFinishRadiusM
-
-// Re-arm when OUTSIDE S/F (keep if you added 'armed' earlier)
-                if (!inZone) armed = true
-
-// RISING EDGE + re-arm + 3s lockout (adjust if needed)
-                if (inZone && armed && !insideSF && (nowMs - lastLapAtMs) >= 3000L) {
-                    // if we were timing a lap, close it and update Best
-                    lapStartAtMs?.let { start ->
-                        val lapTime = nowMs - start
-                        if (bestLapMs == null || lapTime < bestLapMs!!) {
-                            bestLapMs = lapTime
-
-                            // Copy current-lap brake points into best-lap arrays where present
-                            val newBestLat = bestBrakeLat.toMutableList()
-                            val newBestLon = bestBrakeLon.toMutableList()
-                            for (i in 0 until cornerCount) {
-                                val latVal = brakeLat.getOrElse(i) { null }
-                                val lonVal = brakeLon.getOrElse(i) { null }
-                                if (latVal != null && lonVal != null) {
-                                    newBestLat[i] = latVal
-                                    newBestLon[i] = lonVal
-                                }
-                            }
-                            bestBrakeLat = newBestLat
-                            bestBrakeLon = newBestLon
-                        }
-                    }
-
-
-
-                    // start timing the new lap from this crossing
-                    lapStartAtMs = nowMs
-                    currentLapMs = 0L
-
-                    // Reset current-lap brake capture for the new lap
-                    track?.let { t ->
-                        val n = t.corners.size
-                        brakeRecorded = MutableList(n) { false }
-                        brakeLat = MutableList<Double?>(n) { null }
-                        brakeLon = MutableList<Double?>(n) { null }
-                    }
-
-
-                    lap += 1
-                    lastLapAtMs = nowMs
-                    armed = false
-                }
-                insideSF = inZone
-
-                // --- Corner logic (Lua parity) ---
-                run {
-                    val (newAtCorner, newTarget, newDistToTarget) = checkIfAtCornerLua(
-                        track = track,
+        val cb = object : com.google.android.gms.location.LocationCallback() {
+            override fun onLocationResult(res: com.google.android.gms.location.LocationResult) {
+                val loc = res.lastLocation ?: return
+                latest.value = latest.value.copy(
+                    gps = GpsFix(
                         lat = loc.latitude,
                         lon = loc.longitude,
-                        atCorner = atCorner,
-                        targetCornerIdx = targetCornerIdx
+                        tMillis = android.os.SystemClock.elapsedRealtime()
                     )
-                    atCorner = newAtCorner
-                    if (newTarget != targetCornerIdx) targetCornerIdx = newTarget
-                    distToTargetCornerM = newDistToTarget
-                }
-
-                // --- Distance to fastest-lap brake point for current target corner ---
-                track?.let { t ->
-                    val idx = targetCornerIdx.coerceIn(0, (t.corners.size - 1).coerceAtLeast(0))
-                    val latBP = bestBrakeLat.getOrElse(idx) { null }
-                    val lonBP = bestBrakeLon.getOrElse(idx) { null }
-
-                    if (latBP != null && lonBP != null) {
-                        val dNow = haversineMeters(latBP, lonBP, loc.latitude, loc.longitude)
-                        // update approaching/prev
-                        prevDistToBestBrakeM?.let { prev -> approachingBrake = dNow < prev }
-                        distToBestBrakeM = dNow
-                        prevDistToBestBrakeM = dNow
-                    } else {
-                        // no brake point saved for this corner yet
-                        distToBestBrakeM = Double.NaN
-                        prevDistToBestBrakeM = null
-                        approachingBrake = false
-                    }
-                }
-
-
-                // --- Brake point capture (first time per target corner) ---
-                track?.let { t ->
-                    val idx = targetCornerIdx.coerceIn(0, (t.corners.size - 1).coerceAtLeast(0))
-                    val inZoneNow = !distToTargetCornerM.isNaN() && distToTargetCornerM <= t.brakeZoneDistanceM
-
-
-                    if (
-                        inZoneNow &&
-                        longG <= -brakeThreshG &&                 // re-check with the live g here
-                        !brakeRecorded.getOrElse(idx) { false }
-                    ) {
-                        val rec = brakeRecorded.toMutableList().also { it[idx] = true }
-                        val blats = brakeLat.toMutableList().also { it[idx] = loc.latitude }
-                        val blons = brakeLon.toMutableList().also { it[idx] = loc.longitude }
-                        brakeRecorded = rec
-                        brakeLat = blats
-                        brakeLon = blons
-                    }
-                }
-
-
-
+                )
             }
         }
 
-        fused.requestLocationUpdates(req, callback, ctx.mainLooper)
-        onDispose { fused.removeLocationUpdates(callback) }
-    }
-
-    DisposableEffect(forwardVec) {
-        val sm = ctx.getSystemService(android.content.Context.SENSOR_SERVICE) as SensorManager
-        val sensor = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
-
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(e: SensorEvent) {
-                if (e.sensor.type != Sensor.TYPE_LINEAR_ACCELERATION) return
-                val ax = e.values[0]
-                val ay = e.values[1]
-                val az = e.values[2]
-
-                // Project onto calibrated forward vector; fallback to device X if not calibrated
-                val f = forwardVec
-                val alongMs2 = if (f != null) (ax * f[0] + ay * f[1] + az * f[2]) else ax
-
-                // Convert to g's
-                val gNow = (alongMs2 / 9.80665f)
-                emaLong = if (emaLong == null) gNow else (emaAlpha * gNow + (1f - emaAlpha) * emaLong!!)
-                longG = emaLong!!
-            }
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-
-        if (sensor != null) sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
-        onDispose { sm.unregisterListener(listener) }
-    }
-
-
-
-    LaunchedEffect(lapStartAtMs) {
-                while (lapStartAtMs != null) {
-                    currentLapMs = android.os.SystemClock.elapsedRealtime() - lapStartAtMs!!
-                    delay(200L)
-                }
-            }
-
-    LaunchedEffect(captureMsg) {
-        if (captureMsg != null) {
-            delay(1000)
-            captureMsg = null
-        }
-    }
-
-    LaunchedEffect(targetCornerIdx) {
-        // New target corner: clear approach history so countdown logic starts clean
-        prevDistToBestBrakeM = null
-        distToBestBrakeM = Double.NaN
-        approachingBrake = false
-    }
-
-
-    // UI
-    val distStr = lastDist?.let { String.format("%.1f", it) } ?: "—"
-    val latStr = lastLat?.let { String.format("%.6f", it) } ?: "—"
-    val lonStr = lastLon?.let { String.format("%.6f", it) } ?: "—"
-    val edgeM  = lastDist?.let { it - (track?.startFinishRadiusM ?: 0.0) }
-    val edgeStr = edgeM?.let { String.format("%.1f", it) } ?: "—"
-    val showDebug = false
-
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-
-
-
-
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.height(24.dp))
-
-            val mag = kotlin.math.abs(longG)
-            val accelLabel = when {
-                mag < gDeadband -> "Coasting"
-                longG >= 0f -> "Accelerating"
-                else -> "Braking"
-            }
-            Text(
-                text = "$accelLabel: ${String.format("%.1f g", mag)}",
-                fontSize = 48.sp,
-                color = when (accelLabel) {
-                    "Accelerating" -> Color.Green
-                    "Braking" -> Color.Red
-                    else -> Color.Gray // Coasting
-                }
-            )
-
-
-
-            if (track != null) {
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    track.corners.forEachIndexed { i, _ ->
-                        val recorded = brakeRecorded.getOrElse(i) { false }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "C${i + 1}", fontSize = 20.sp)
-                            Text(
-                                text = "●",
-                                fontSize = 40.sp, // much larger dot
-                                color = if (recorded) Color(0xFF22C55E) else Color.Gray
-                            )
-                        }
-                    }
-                }
-            }
-
-// ---- Brake countdown (6..0 with color-coded circle) ----
-            if (track != null) {
-                val warn = track.brakeWarnDistanceM         // e.g., 200 m
-                val zeroEps = 5.0                           // show "0" within 5 m of the brake point
-
-                val view = computeCountdownView(
-                    distToBestBrakeM = distToBestBrakeM,
-                    warnM = warn,
-                    zeroEpsM = zeroEps,
-                    approachingBrake = approachingBrake
-                )
-
-                Spacer(Modifier.height(12.dp))
-                Box(
-                    modifier = Modifier
-                        .size(220.dp)
-                        .background(view.circleColor, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (view.visible) {
-                        Text(
-                            text = view.stage.toString(),  // 6..0
-                            fontSize = 96.sp,
-                            color = view.textColor
-                        )
-                    }
-                }
-            }
-
-
-
-
-            captureMsg?.let {
-                Text(
-                    text = it,
-                    color = Color(0xFF22C55E),
-                    fontSize = 28.sp,
-                    modifier = Modifier
-                        .padding(top = 72.dp)
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Text("Racing Screen", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(8.dp))
-            Text("Track: ${track?.name ?: "— (select a track)"}")
-            Spacer(Modifier.height(8.dp))
-            Text("Lap: $lap", style = MaterialTheme.typography.headlineMedium)
-            Spacer(Modifier.height(8.dp))
-            Text("Current lap time: ${formatMs(currentLapMs)}")
-            Text("Best lap time: ${formatMs(bestLapMs)}")
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "At corner: $atCorner",
-                fontSize = 12.sp // Add this line
-            )
-            Text(
-                text = "Target corner idx: ${targetCornerIdx + 1}",
-                fontSize = 12.sp // Add this line
-            )
-            Text(
-                text = "Dist to target (m): ${
-                    if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
-                }",
-                fontSize = 12.sp // Add this line
-            )
-
-            // Debug line (remove later if you want)
-            Text("Brake? $brakeDetected   In zone? $inBrakeZone", fontSize = 18.sp)
-
-            Text(
-                text = "Target C${targetCornerIdx + 1}  dist=${if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)} m  zone≤${String.format("%.0f", track?.brakeZoneDistanceM ?: 0.0)}  inZone=$inBrakeZone",
-                fontSize = 12.sp,
-                color = if (inBrakeZone) Color(0xFF22C55E) else Color.Gray
-            )
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "DBG  lap=$lap  bestLap=${formatMs(bestLapMs)}  curLap=${formatMs(currentLapMs)}",
-                    fontSize = 18.sp,
-                    color = Color.LightGray
-                )
-
-                Text(
-                    text = "Target C${targetCornerIdx + 1} | distToTarget=${
-                        if (distToTargetCornerM.isNaN()) "—" else String.format("%.1f", distToTargetCornerM)
-                    } m | inZone=${track?.let { !distToTargetCornerM.isNaN() && distToTargetCornerM <= it.brakeZoneDistanceM } ?: false}",
-                    fontSize = 18.sp,
-                    color = Color.LightGray
-                )
-
-                Text(
-                    text = "BestBrake dist=${
-                        if (distToBestBrakeM.isNaN()) "—" else String.format("%.1f", distToBestBrakeM)
-                    } m  haveBest=${!distToBestBrakeM.isNaN()}  approaching=$approachingBrake",
-                    fontSize = 18.sp,
-                    color = Color.LightGray
-                )
-
-
-
-                Spacer(Modifier.height(8.dp))
-
-                Text(
-                    text = "CD vis=${!distToBestBrakeM.isNaN() && distToBestBrakeM <= (track?.brakeWarnDistanceM ?: Double.MAX_VALUE) && (approachingBrake || (!distToBestBrakeM.isNaN() && distToBestBrakeM <= (track?.brakeZoneDistanceM ?: 0.0)))}  distBest=${if (distToBestBrakeM.isNaN()) "—" else String.format("%.1f", distToBestBrakeM)}  approaching=$approachingBrake",
-                    fontSize = 18.sp,
-                    color = Color.LightGray
-                )
-
-
-
-                Text(
-                    text = "G=${String.format("%.2f", longG)}  brakeThresh=${String.format("%.2f", brakeThreshG)}  brakeDetected=${longG <= -brakeThreshG}",
-                    fontSize = 18.sp,
-                    color = Color.LightGray
-                )
-
-
-            }
-
-
-            /*
-                            Text("In S/F zone: $insideSF")
-                            Text("Dist to S/F (m): $distStr")
-                            Text("GPS: $latStr, $lonStr")
-                            Text("GPS ticks: $gpsTicks")
-                            Text("Dist to S/F center (m): $distStr")
-                            Text("Dist to S/F edge (m): $edgeStr")
-
-
-                        Spacer(Modifier.height(16.dp))
-                        // Indoor test helpers
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Button(onClick = {
-                                // Simulate entering S/F (rising edge)
-                                if (!insideSF) {
-                                    insideSF = true
-                                    lap += 1
-                                }
-                            }) { Text("Simulate Enter S/F") }
-
-                            Button(onClick = { insideSF = false }) { Text("Simulate Exit S/F") }
-                        }
-                */
-        }
+        fused.requestLocationUpdates(req, cb, ctx.mainLooper)
+        onDispose { fused.removeLocationUpdates(cb) }
     }
 }
 
-private fun formatMs(ms: Long?): String =
-    if (ms == null) "—" else {
-        val minutes = ms / 60_000
-        val seconds = (ms % 60_000) / 1_000
-        val hundredths = (ms % 1_000) / 10
-        String.format("%d:%02d.%02d", minutes, seconds, hundredths)
+
+
+@Composable
+fun rememberLatestInputsMailbox(): MutableState<LatestInputs> {
+    return remember { mutableStateOf(LatestInputs()) }
+}
+
+
+// allows swipe between a "Racing UI — coming soon" page and the live Debug page.
+
+@Composable
+fun RacingScreen() {
+    // 10 Hz heartbeat counter
+    var ticks by remember { mutableStateOf(0L) }
+
+    // Mailbox for latest sensor inputs
+    val latest = rememberLatestInputsMailbox()
+    val world = rememberWorldState()
+    // --- Track selection from DataStore ---
+    val context = LocalContext.current
+    val trackRepo = remember(context) { TrackRepo(context) }
+    val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
+    val track = selectedTrack ?: Tracks.DcfNeighborhood   // fallback if none chosen
+
+    // Start GPS producer
+    GpsProducer(latest)
+
+    // 10 Hz loop (runs in background coroutine)
+    LaunchedEffect(Unit) {
+        while (true) {
+            world.value = checkIfAtStartFinish(latest.value, world.value, track)
+            ticks++
+            delay(100L)
+        }
     }
 
-private data class CountdownView(
-    val visible: Boolean,
-    val stage: Int,          // 6..0 when visible
-    val circleColor: Color,
-    val textColor: Color
-)
 
-private fun computeCountdownView(
-    distToBestBrakeM: Double,
-    warnM: Double,          // e.g., 200 m
-    zeroEpsM: Double,       // e.g., 5 m  (only show 0 inside this)
-    approachingBrake: Boolean
-): CountdownView {
-    val haveBest = !distToBestBrakeM.isNaN()
-    val inWarn = haveBest && distToBestBrakeM <= warnM
-    val atPoint = haveBest && distToBestBrakeM <= zeroEpsM
+    // ---- UI: two pages
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
 
-    // Show only when inside warn AND (approaching OR at/near brake point)
-    val visible = inWarn && (approachingBrake || atPoint)
-    if (!visible) {
-        return CountdownView(
-            visible = false,
-            stage = -1,
-            circleColor = Color(0xFF444444), // gray puck
-            textColor = Color(0xFFB0B0B0)
+    HorizontalPager(
+        state = pagerState,
+        modifier = Modifier.fillMaxSize()
+    ) { page ->
+        when (page) {
+            0 -> RacingUi(world = world.value, track = track)
+            1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track)
+        }
+    }
+
+}
+
+
+/*
+ * RacingUi: placeholder for the real racing HUD.
+ *
+ * Purpose:
+ * - Placeholder only; we'll build the countdown UI later.
+ */
+@Composable
+private fun RacingUi(world: WorldState, track: Track) {
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // TOP: Track name (small, out of the way)
+        Text(
+            text = track.name,
+            fontSize = 16.sp,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp)
+        )
+
+        // CENTER: Big current lap time + best lap
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Current lap time — as big as is practical for most devices
+            Text(
+                text = "Current Lap: ${formatMs(world.currentLapElapsedMs)}",
+                fontSize = 36.sp    // bump up/down after a road test if needed
+            )
+
+            // Best lap (secondary, but still large)
+            Text(
+                text = "Best: ${formatMs(world.bestLapMs)}",
+                fontSize = 36.sp
+            )
+        }
+
+        // BOTTOM: Lap counter
+        Text(
+            text = "Lap: ${world.lapCount}",
+            fontSize = 26.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp)
         )
     }
+}
 
-    val stage = if (atPoint) 0
-    else {
-        // Map distance in (0..warn] to 1..6 (6 at warn, 1 near the point)
-        kotlin.math.ceil((distToBestBrakeM / warnM) * 6.0)
-            .toInt()
-            .coerceIn(1, 6)
+
+/*
+ * DebugUi: live debug panel showing internal values.
+ *
+ * Purpose:
+ * - Display internal variables, state flags, and sensor snapshots.
+ * - Right now: shows tick count, GPS lat/lon, and GPS sample age.
+ */
+@Composable
+private fun DebugUi(ticks: Long, latest: LatestInputs, world: WorldState, track: Track) {
+    val gps = latest.gps
+    val ageMs = gps?.let { android.os.SystemClock.elapsedRealtime() - it.tMillis }
+
+    androidx.compose.foundation.layout.Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+    ) {
+        androidx.compose.material3.Text("DEBUG V1.1", fontSize = 22.sp)
+        androidx.compose.material3.Text("Tick: $ticks")
+        androidx.compose.material3.Text("GPS lat: ${gps?.lat}")
+        androidx.compose.material3.Text("GPS lon: ${gps?.lon}")
+        androidx.compose.material3.Text("GPS age ms: ${ageMs ?: "n/a"}")
+
+        // start/finish info
+        val dStr = world.distToStartM?.let { String.format("%.1f m", it) } ?: "n/a"
+        androidx.compose.material3.Text("Start/Finish dist: $dStr")
+        androidx.compose.material3.Text("In S/F zone: ${world.inStartZone}")
+
+        // lap counter
+        Text("Lap: ${world.lapCount}")
+
+        // --- NEW: Lap timing ---
+        Text("Current lap: ${formatMs(world.currentLapElapsedMs)}")
+        Text("Best lap:    ${formatMs(world.bestLapMs)}")
     }
+}
 
-    val circle = when (stage) {
-        6, 5, 4 -> Color(0xFF22C55E)  // Green
-        3, 2, 1 -> Color(0xFFFFC107)  // Yellow
-        0       -> Color(0xFFEF4444)  // Red
-        else    -> Color(0xFF444444)
-    }
 
-    return CountdownView(
-        visible = true,
-        stage = stage,
-        circleColor = circle,
-        textColor = Color.White
+//function that determines the distance from start/finish and whether we are in the start finish zone
+private fun updateStartZone(
+    inputs: LatestInputs,
+    world: WorldState,
+    track: Track
+): WorldState {
+    val fix = inputs.gps ?: return world.copy(distToStartM = null, inStartZone = false)
+
+    val d = haversineMeters(
+        fix.lat, fix.lon,
+        track.startFinish.lat, track.startFinish.lon
+    )
+    val inZone = d <= track.startFinishRadiusM
+
+    return world.copy(
+        distToStartM = d,
+        inStartZone = inZone
+    )
+}
+
+//Rising-edge latch to increment lapCount at Start/Finish.
+private fun updateLapOnStartZone(world: WorldState): WorldState {
+    val now = android.os.SystemClock.elapsedRealtime()
+    val allowed = isEnteringAllowed(world, now)
+    val newLap = if (allowed) world.lapCount + 1 else world.lapCount
+    val newLast = if (allowed) now else world.lastSfEnterMs
+
+    // Always advance the latch so rising-edge detection works next tick
+    return world.copy(
+        lapCount = newLap,
+        wasInStartZone = world.inStartZone,
+        lastSfEnterMs = newLast
     )
 }
 
 
-
-private fun checkIfAtCornerLua(
-    track: Track,
-    lat: Double,
-    lon: Double,
-    atCorner: Boolean,
-    targetCornerIdx: Int
-): Triple<Boolean, Int, Double> {
-
-    val tol = track.cornerToleranceM
-    val corners = track.corners
-    if (corners.isEmpty()) return Triple(false, 0, Double.NaN)
-
-    var distToTarget = Double.NaN
-    var nearIdx = -1
-
-    corners.forEachIndexed { i, c ->
-        val delta = haversineMeters(c.lat, c.lon, lat, lon)
-        if (i == targetCornerIdx) distToTarget = delta
-        if (delta < tol) nearIdx = i
-    }
-
-    val nowAtCorner = (nearIdx != -1)
-
-    val nextTarget =
-        if (!atCorner && nowAtCorner) (nearIdx + 1) % corners.size
-        else targetCornerIdx
-
-    return Triple(nowAtCorner, nextTarget, distToTarget)
+//LAP TIMER - Update current lap elapsed time each 10 Hz tick.
+private fun tickUpdateLapElapsed(world: WorldState): WorldState {
+    val start = world.currentLapStartMs ?: return world
+    val now = android.os.SystemClock.elapsedRealtime()
+    val elapsed = now - start
+    return world.copy(currentLapElapsedMs = elapsed)
 }
 
+//Starting the lap timer on the first start/finish crossing
+private fun startLapOnFirstCrossing(world: WorldState): WorldState {
+    if (world.currentLapStartMs != null) return world
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (!isEnteringAllowed(world, now)) {
+        // even if not allowed, carry the latch forward:
+        return world
+    }
+    return world.copy(
+        currentLapStartMs = now,
+        currentLapElapsedMs = 0L,
+        lastSfEnterMs = now
+    )
+}
+
+
+//Finish a lap on subsequent Start/Finish crossings.
+private fun finishLapOnCrossing(world: WorldState): WorldState {
+    val start = world.currentLapStartMs ?: return world
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (!isEnteringAllowed(world, now)) return world
+
+    val lapMs = now - start
+    val newBest = world.bestLapMs?.let { kotlin.math.min(it, lapMs) } ?: lapMs
+    return world.copy(
+        bestLapMs = newBest,
+        currentLapStartMs = now,      // immediately start next lap
+        currentLapElapsedMs = 0L,
+        lastSfEnterMs = now
+    )
+}
+
+
+//(Lap Timer UI): Add a millisecond→text formatter.
+private fun formatMs(ms: Long?): String {
+    if (ms == null) return "--:--.---"
+    val minutes = ms / 60_000
+    val seconds = (ms % 60_000) / 1_000
+    val millis  = ms % 1_000
+    return String.format("%d:%02d.%03d", minutes, seconds, millis)
+}
+
+//function to check if we're at the start finish and update the world state accordingly
+private fun checkIfAtStartFinish(
+    inputs: LatestInputs,
+    world: WorldState,
+    track: com.example.hotlapmobile.config.Track
+): WorldState {
+    var w = world
+    w = updateStartZone(inputs, w, track)  // 1
+    w = finishLapOnCrossing(w)             // 2
+    w = startLapOnFirstCrossing(w)         // 3
+    w = updateLapOnStartZone(w)            // 4
+    w = tickUpdateLapElapsed(w)            // 5
+    return w
+}
+
+
+//debounce cooldowwn timer for start/finish cross.
+
+private const val COOLDOWN_MS = 2000L  // 2s is conservative; tune after testing
+
+/*
+ * True iff this tick is a rising edge AND the cooldown has elapsed.
+ */
+private fun isEnteringAllowed(world: WorldState, now: Long = android.os.SystemClock.elapsedRealtime()): Boolean {
+    val entering = world.inStartZone && !world.wasInStartZone
+    if (!entering) return false
+    val last = world.lastSfEnterMs ?: return true
+    return (now - last) >= COOLDOWN_MS
+}
