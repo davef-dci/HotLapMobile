@@ -18,6 +18,94 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.data.TrackRepo
 import androidx.compose.ui.platform.LocalContext
 
+//imports for the hardware accelerometers
+
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
+import com.example.hotlapmobile.data.PrefsRepo
+import kotlin.math.sqrt
+import com.example.hotlapmobile.data.CalibRepo
+import com.example.hotlapmobile.data.CalibState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+
+import androidx.compose.foundation.Canvas
+
+import androidx.compose.ui.unit.dp
+import kotlin.math.abs
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Fill
+import androidx.compose.ui.unit.toSize
+
+
+
+
+enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
+
+
+//stream the accelerometer sensor and fill longG based on +X axis
+@Composable
+private fun AccelProducer(latest: MutableState<LatestInputs>) {
+    val ctx = LocalContext.current
+
+
+
+    // read the calibrated forward unit vector (falls back to +X if not set)
+    val calibRepo = remember(ctx) { CalibRepo(ctx) }
+    val calibState = calibRepo.state
+        .collectAsStateWithLifecycle(initialValue = CalibState(vec = null, savedAtEpochMs = null))
+        .value
+
+// Build a normalized forward vector from saved state; default to +X if missing/zero
+    val (fx, fy, fz) = run {
+        val v = calibState.vec ?: floatArrayOf(1f, 0f, 0f)
+        val n = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).let { if (it == 0f) 1f else it }
+        Triple(v[0]/n, v[1]/n, v[2]/n)
+    }
+
+
+    DisposableEffect(Unit) {
+        val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val lin = sm.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+
+        if (lin == null) {
+            // Device has no linear-accel sensor; clear value
+            latest.value = latest.value.copy(longG = null)
+            return@DisposableEffect onDispose { }
+        }
+
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                if (e.sensor.type != Sensor.TYPE_LINEAR_ACCELERATION) return
+                // Proejct acceleation onto the calibrated X axis
+                val ax = e.values[0]           // m/s² along +X
+                val ay = e.values[1]           // m/s² along +Y
+                val az = e.values[2]           // m/s² along +Z
+
+                val projMs2 = fx * ax + fy * ay + fz * az
+                val gProj = projMs2 / ONE_G
+                latest.value = latest.value.copy(longG = gProj)
+
+
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+        sm.registerListener(listener, lin, SensorManager.SENSOR_DELAY_GAME)
+        onDispose { sm.unregisterListener(listener) }
+    }
+}
 
 // Hold one GPS reading (latitude, longitude) with a monotonic time tag (tMillis).
 data class GpsFix(
@@ -28,9 +116,9 @@ data class GpsFix(
 
  //LatestInputs holds the most recent sensor readings we care about.
 data class LatestInputs(
-    val gps: GpsFix? = null
+    val gps: GpsFix? = null,
+    val longG: Float? = null      // longitudinal accel in g, projected on calibrated forward
 )
-
 
 //Prepare fields we'll need for S/F detection and lap counting.
 data class WorldState(
@@ -46,6 +134,14 @@ data class WorldState(
     val lastSfEnterMs: Long? = null
 )
 
+
+//helpers to convert sensor readings to g's and project acceleration onto calibrated forward axis.
+
+private const val ONE_G = 9.80665f   // conversion from m/s² → g
+
+private fun dot3(a: FloatArray, x: Float, y: Float, z: Float): Float {
+    return a[0] * x + a[1] * y + a[2] * z
+}
 
 @Composable
 fun rememberWorldState(): MutableState<WorldState> =
@@ -118,15 +214,35 @@ fun RacingScreen() {
     val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
     val track = selectedTrack ?: Tracks.DcfNeighborhood   // fallback if none chosen
 
+    //context for braking and accelerating
+    val prefsRepo = remember(context) { PrefsRepo(context) }
+    val brakeThreshG = prefsRepo.brakeThreshG
+        .collectAsStateWithLifecycle(initialValue = 0.20f) // default if unset
+        .value
+    var phase by remember { mutableStateOf(DrivePhase.UNKNOWN) }
+
+
+    // start streaming linear acceleration → latest.value.longG
+    AccelProducer(latest)
+
     // Start GPS producer
     GpsProducer(latest)
 
     // 10 Hz loop (runs in background coroutine)
     LaunchedEffect(Unit) {
         while (true) {
-            world.value = checkIfAtStartFinish(latest.value, world.value, track)
+            world.value = checkIfAtStartFinish(latest.value, world.value, track) // check if at start finish
+
+            phase = detectDrivePhase(latest.value.longG, brakeThreshG) // check if accelerating or braking
+
             ticks++
+
+
+
             delay(100L)
+
+
+
         }
     }
 
@@ -139,8 +255,8 @@ fun RacingScreen() {
         modifier = Modifier.fillMaxSize()
     ) { page ->
         when (page) {
-            0 -> RacingUi(world = world.value, track = track)
-            1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track)
+            0 -> RacingUi(world = world.value, track = track, g=latest.value.longG ?: 0f)
+            1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track, phase = phase, brakeThreshG = brakeThreshG)
         }
     }
 
@@ -154,10 +270,10 @@ fun RacingScreen() {
  * - Placeholder only; we'll build the countdown UI later.
  */
 @Composable
-private fun RacingUi(world: WorldState, track: Track) {
+private fun RacingUi(world: WorldState, track: Track, g: Float) {
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // TOP: Track name (small, out of the way)
+        // TOP: Track name
         Text(
             text = track.name,
             fontSize = 16.sp,
@@ -166,37 +282,32 @@ private fun RacingUi(world: WorldState, track: Track) {
                 .padding(top = 12.dp)
         )
 
-        // CENTER: Big current lap time + best lap
-        Column(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Current lap time — as big as is practical for most devices
-            Text(
-                text = "Current Lap: ${formatMs(world.currentLapElapsedMs)}",
-                fontSize = 36.sp    // bump up/down after a road test if needed
-            )
 
-            // Best lap (secondary, but still large)
-            Text(
-                text = "Best: ${formatMs(world.bestLapMs)}",
-                fontSize = 36.sp
-            )
+// RIGHT: one combined indicator (bar behind, gray box on top)
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp)
+        ) {
+            RightGIndicator(g = g, maxAbs = 0.5f) // tighter range so you can see movement easily
         }
 
-        // BOTTOM: Lap counter
-        Text(
-            text = "Lap: ${world.lapCount}",
-            fontSize = 26.sp,
+
+        // BOTTOM: Current / Best / Lap counter
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 24.dp)
-        )
+                .padding(bottom = 24.dp, start = 24.dp, end = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = "Current Lap: ${formatMs(world.currentLapElapsedMs)}", fontSize = 32.sp)
+            Text(text = "Best: ${formatMs(world.bestLapMs)}", fontSize = 28.sp)
+            Text(text = "Lap: ${world.lapCount}", fontSize = 22.sp)
+        }
     }
 }
+
 
 
 /*
@@ -207,7 +318,14 @@ private fun RacingUi(world: WorldState, track: Track) {
  * - Right now: shows tick count, GPS lat/lon, and GPS sample age.
  */
 @Composable
-private fun DebugUi(ticks: Long, latest: LatestInputs, world: WorldState, track: Track) {
+private fun DebugUi(
+    ticks: Long,
+    latest: LatestInputs,
+    world: WorldState,
+    track: Track,
+    phase: DrivePhase,
+    brakeThreshG: Float
+) {
     val gps = latest.gps
     val ageMs = gps?.let { android.os.SystemClock.elapsedRealtime() - it.tMillis }
 
@@ -223,6 +341,10 @@ private fun DebugUi(ticks: Long, latest: LatestInputs, world: WorldState, track:
         androidx.compose.material3.Text("GPS lon: ${gps?.lon}")
         androidx.compose.material3.Text("GPS age ms: ${ageMs ?: "n/a"}")
 
+
+
+
+
         // start/finish info
         val dStr = world.distToStartM?.let { String.format("%.1f m", it) } ?: "n/a"
         androidx.compose.material3.Text("Start/Finish dist: $dStr")
@@ -234,8 +356,40 @@ private fun DebugUi(ticks: Long, latest: LatestInputs, world: WorldState, track:
         // --- NEW: Lap timing ---
         Text("Current lap: ${formatMs(world.currentLapElapsedMs)}")
         Text("Best lap:    ${formatMs(world.bestLapMs)}")
+
+        Text(
+            text = buildString {
+                append("Phase: ${phase.name}\n")
+                append("Longitudinal accel: ${"%.2f".format(latest.longG ?: 0f)} g\n")
+                append("Threshold: \u00B1${"%.2f".format(brakeThreshG)} g")
+            },
+            color = Color.Gray,
+            fontSize = 16.sp
+        )
     }
 }
+
+@Composable
+private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
+    val label = "${"%.1f".format(g)} g"
+
+    Box(
+        modifier = modifier
+            .width(90.dp)            // wider
+            .height(120.dp)          // taller gray band
+            .background(Color(0xFFD9D9D9), RoundedCornerShape(10.dp))
+            .padding(4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontSize = 28.sp,
+            color = Color.Black
+        )
+    }
+}
+
+
 
 
 //function that determines the distance from start/finish and whether we are in the start finish zone
@@ -352,4 +506,89 @@ private fun isEnteringAllowed(world: WorldState, now: Long = android.os.SystemCl
     if (!entering) return false
     val last = world.lastSfEnterMs ?: return true
     return (now - last) >= COOLDOWN_MS
+}
+
+
+private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
+    val g = longG ?: return DrivePhase.UNKNOWN
+    return when {
+        g <= -threshold -> DrivePhase.BRAKING
+        g >=  threshold -> DrivePhase.ACCELERATING
+        else -> DrivePhase.COASTING
+    }
+}
+
+@Composable
+private fun GArrowBar(
+    g: Float,
+    maxAbs: Float = 1.5f,
+    modifier: Modifier = Modifier
+) {
+    Canvas(
+        modifier = modifier
+            .width(90.dp)
+            .height(220.dp)
+    ) {
+        val w = size.width
+        val h = size.height
+        val half = h / 2f
+
+        val deadband = 0.02f
+        val clamped = g.coerceIn(-maxAbs, maxAbs)
+        val frac = abs(clamped) / maxAbs
+
+        // color by direction
+        val barColor = when {
+            clamped > deadband  -> Color(0xFF16A34A) // green
+            clamped < -deadband -> Color(0xFFDC2626) // red
+            else                -> Color(0xFF9CA3AF) // gray (coast)
+        }
+
+        // ensure a small visible bar whenever outside deadband
+        val minLenPx = if (abs(clamped) > deadband) 6.dp.toPx() else 0f
+        val len = maxOf(half * frac, minLenPx)
+
+        val radius = 4.dp.toPx()
+
+        if (clamped >= 0f) {
+            // UP from center
+            drawRoundRect(
+                color = barColor,
+                topLeft = Offset(0f, half - len),
+                size = Size(w, len),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+            )
+        } else {
+            // DOWN from center
+            drawRoundRect(
+                color = barColor,
+                topLeft = Offset(0f, half),
+                size = Size(w, len),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+            )
+        }
+    }
+}
+
+@Composable
+private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
+    Box(
+        modifier = Modifier
+            .width(110.dp)
+            .height(220.dp)
+    ) {
+        // BACK: vertical bar
+        GArrowBar(
+            g = g,
+            maxAbs = maxAbs,
+            modifier = Modifier
+                .align(Alignment.CenterEnd) // right edge
+        )
+        // FRONT: gray box centered (covers middle so bar grows above/below it)
+        GReadoutBox(
+            g = g,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+        )
+    }
 }
