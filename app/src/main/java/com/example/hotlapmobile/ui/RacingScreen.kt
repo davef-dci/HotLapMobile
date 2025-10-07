@@ -61,8 +61,14 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import android.os.SystemClock
+
+import android.util.Log
 
 
+
+
+private const val APPROACH_EPS_M = 1.0  // meters of change needed to flip state
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
@@ -162,6 +168,74 @@ data class LatestInputs(
     val longG: Float? = null      // longitudinal accel in g, projected on calibrated forward
 )
 
+// Holds the moment we first detected braking and the GPS fix just BEFORE it.
+data class PendingBrakeCapture(
+    val brakeEventMs: Long, // SystemClock.elapsedRealtime() at brake onset
+    val before: GpsFix,     // GPS fix immediately before the brake event
+    val cornerIdx: Int      // which corner we’re targeting when this starts
+)
+
+// Hand-off container for an interpolated candidate brake point
+data class InterpCandidate(
+    val cornerIdx: Int,
+    val pt: LatLon
+)
+
+
+// Convenience: create a pending brake capture from current state.
+private fun startPendingBrakeCapture(
+    world: WorldState,
+    nowMs: Long,
+    before: GpsFix,
+    cornerIdx: Int
+): WorldState {
+    val pending = PendingBrakeCapture(
+        brakeEventMs = nowMs,
+        before = before,
+        cornerIdx = cornerIdx
+    )
+    return world.copy(pendingBrake = pending)
+}
+
+// Linear interpolate doubles
+private inline fun lerp(a: Double, b: Double, f: Double): Double = a + f * (b - a)
+
+// Finish a pending capture when we have the "after" GPS fix.
+// Returns a new WorldState with pending cleared. (You can later store the result point.)
+private fun finishPendingBrakeCapture(
+    world: WorldState,
+    after: GpsFix,      // the first GPS fix strictly AFTER the brake event
+    nowMs: Long         // usually the same as after.tMillis, but we pass it for consistency
+): Pair<WorldState, LatLon?> {
+    val pending = world.pendingBrake ?: return world to null
+
+    // Guard: ensure time ordering
+    val t0 = pending.before.tMillis
+    val t1 = after.tMillis
+    if (t1 <= t0 || pending.brakeEventMs < t0 || pending.brakeEventMs > t1) {
+        // Not a valid pair to interpolate; just clear pending safely.
+        return world.copy(pendingBrake = null) to null
+    }
+
+    val denom = (t1 - t0).toDouble()
+    val rawF = (pending.brakeEventMs - t0).toDouble() / denom
+    val f = rawF.coerceIn(0.0, 1.0)
+
+    val lat = lerp(pending.before.lat, after.lat, f)
+    val lon = lerp(pending.before.lon, after.lon, f)
+    val pt = LatLon(lat, lon)
+
+    val newWorld = world.copy(
+        pendingBrake = null,
+        // optional: if you have a debug string, set it here later when we wire in
+        // lastBrakeCaptureNote = "Interpolated C${pending.cornerIdx+1} f=${"%.2f".format(f)}"
+    )
+    return newWorld to pt
+}
+
+
+
+
 //Prepare fields we'll need for S/F detection and lap counting.
 data class WorldState(
     val lapCount: Int = 0,
@@ -201,8 +275,18 @@ data class WorldState(
 
     val countdownShow: Boolean = false,
     val countdownSeconds: Int? = null,  // 0..N
-    val countdownRingFrac: Float? = null  // 0f..1f
-)
+    val countdownRingFrac: Float? = null,  // 0f..1f
+
+    // --- Brake capture (interpolation) ---
+    val pendingBrake: PendingBrakeCapture? = null,
+
+    // --- Interpolated brake point handoff (consumed by updateBrakePointState)
+    val interpolatedCandidate: InterpCandidate? = null,
+
+// Are we getting closer to the target brake point (true), moving away (false), or unknown (null)?
+    val isApproachingTBP: Boolean? = null,
+
+    )
 
 
 //helpers to convert sensor readings to g's and project acceleration onto calibrated forward axis.
@@ -354,6 +438,11 @@ fun rememberLatestInputsMailbox(): MutableState<LatestInputs> {
 
 @Composable
 fun RacingScreen() {
+
+
+
+    var ranDeskSim by remember { mutableStateOf(false) }  // simulator for desk testing of interpolation - can be removed
+
     // 10 Hz heartbeat counter
     var ticks by remember { mutableStateOf(0L) }
 
@@ -379,6 +468,12 @@ fun RacingScreen() {
         .value
     var phase by remember { mutableStateOf(DrivePhase.UNKNOWN) }
 
+    // Keep track of the last GPS fix we've processed - used to interpolate brake points.
+    var prevGps by remember { mutableStateOf<GpsFix?>(null) }
+
+// For approach/leave detection
+    var prevDistToTBP by remember { mutableStateOf<Double?>(null) }
+
 
     // start streaming linear acceleration → latest.value.longG
     AccelProducer(latest)
@@ -388,6 +483,9 @@ fun RacingScreen() {
 
     LaunchedEffect(Unit) {
         while (true) {
+
+
+
             // 1) Start/Finish + corner
             world.value = checkIfAtStartFinish(latest.value, world.value, track)
             world.value = updateCornerState(latest.value, world.value, track)
@@ -395,18 +493,76 @@ fun RacingScreen() {
             // 2) Detect phase for this tick
             val phaseNow = detectDrivePhase(latest.value.longG, brakeThreshG)
 
+
+
             // 3) Update world with current GPS fix + braking flag
             val fix = latest.value.gps
+
+            // If a new GPS fix arrived (by timestamp), remember the previous one
+            if (fix != null && fix.tMillis != prevGps?.tMillis) {
+                prevGps = fix
+            }
+
+
             world.value = world.value.copy(
                 currentLatLon = fix?.let { LatLon(it.lat, it.lon) },
                 isBrakingNow = (phaseNow == DrivePhase.BRAKING)
             )
 
+            // 3.5) Start a pending brake capture the moment braking begins (simple gate for now)
+            if (world.value.pendingBrake == null && world.value.isBrakingNow) {
+                val nowMs = SystemClock.elapsedRealtime()
+                val beforeFix = latest.value.gps
+                val cornerIdx = world.value.targetCornerIdx
+                if (beforeFix != null && cornerIdx >= 0) {
+                    world.value = startPendingBrakeCapture(
+                        world = world.value,
+                        nowMs = nowMs,
+                        before = beforeFix,
+                        cornerIdx = cornerIdx
+                    )
+                    // optional debug:
+                    // world.value = world.value.copy(lastBrakeCaptureNote = "Pending C${cornerIdx+1}…")
+                }
+            }
+
+
+// 3.6) If we have a pending brake capture and a NEW fix that is after the brake event, finish it
+            world.value.pendingBrake?.let { pending ->
+                val after = latest.value.gps
+                if (after != null && after.tMillis > pending.brakeEventMs) {
+                    val (newWorld, pt) = finishPendingBrakeCapture(
+                        world = world.value,
+                        after = after,
+                        nowMs = after.tMillis
+                    )
+                    world.value = newWorld
+
+                    if (pt != null) {
+                        // Stash interpolated candidate for updateBrakePointState to consume
+                        world.value = world.value.copy(
+                            interpolatedCandidate = InterpCandidate(
+                                cornerIdx = pending.cornerIdx,
+                                pt = pt
+                            )
+                        )
+                        Log.d(
+                            "BRAKE",
+                            "Interpolated brake point for C${pending.cornerIdx + 1}: " +
+                                    "%.6f, %.6f".format(pt.lat, pt.lon)
+                        )
+                    } else {
+                        Log.d("BRAKE", "Pending capture cleared (no point)")
+                    }
+                }
+            }
+
+
+
+
             // 4) Try capturing a candidate brake point (tidy one-liner)
             world.value = updateBrakePointState(world.value, track)
 
-            // 5) Any other per-tick bookkeeping you keep (optional)
-            // phase = phaseNow   // if you show it elsewhere
 
             // Use the recorded fastest brake point for the current target corner (if any)
             val tbp = world.value.fastestBrakePts[world.value.targetCornerIdx]
@@ -414,9 +570,44 @@ fun RacingScreen() {
                 world.value = world.value.copy(targetBrakePoint = tbp)
             }
 
-            //extrapolating from last GPS fix to time to brake
+            // 3.x) Update approach/leave flag based on distance trend to TBP
+            run {
+                val tbpNow = world.value.targetBrakePoint
+                val curr = world.value.currentLatLon
+                if (tbpNow != null && curr != null) {
+                    val dNow = haversineMeters(
+                        curr.lat, curr.lon,
+                        tbpNow.lat, tbpNow.lon
+                    )
+
+                    val dPrev = prevDistToTBP
+                    val newFlag = when {
+                        dPrev == null -> world.value.isApproachingTBP // don't decide on first sample
+                        (dPrev - dNow) > APPROACH_EPS_M -> true       // getting closer
+                        (dNow - dPrev) > APPROACH_EPS_M -> false      // moving away
+                        else -> world.value.isApproachingTBP          // within noise band, keep last
+                    }
+                    if (newFlag != world.value.isApproachingTBP) {
+                        world.value = world.value.copy(isApproachingTBP = newFlag)
+                        // Optional debug:
+                        // Log.d("BRAKE", "TBP trend: ${if (newFlag==true) "approaching" else "leaving"} (d=%.1f m)".format(dNow))
+                    }
+                    prevDistToTBP = dNow
+                } else {
+                    // Lost TBP or position — reset local memory and flag to unknown
+                    prevDistToTBP = null
+                    if (world.value.isApproachingTBP != null) {
+                        world.value = world.value.copy(isApproachingTBP = null)
+                    }
+                }
+            }
+
+
+// --- Show countdown only when APPROACHING the TBP ---
             val tToBrake = extrapolatedTimeToBrake(world.value)
-            if (tToBrake != null) {
+            val approaching = (world.value.isApproachingTBP == true)
+
+            if (tToBrake != null && approaching) {
                 val out = countdownFrom(tToBrake, track.brakeWarnTimeS)
                 world.value = world.value.copy(
                     countdownShow = out.show,
@@ -424,13 +615,14 @@ fun RacingScreen() {
                     countdownRingFrac = if (out.show) out.ringFrac.coerceIn(0f, 1f) else null
                 )
             } else {
-                // hide when we don’t have a valid estimate
+                // hide when not approaching OR when we don’t have a valid estimate
                 world.value = world.value.copy(
                     countdownShow = false,
                     countdownSeconds = null,
                     countdownRingFrac = null
                 )
             }
+
 
 
 
@@ -449,8 +641,6 @@ fun RacingScreen() {
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 👇 Dev buttons row at the top
-        DevPanel(world = world, latest = latest)
 
         // 👇 Pager takes the rest of the space
         HorizontalPager(
@@ -630,26 +820,6 @@ private fun DebugUi(
 
 
 
-    }
-}
-
-@Composable
-private fun DevPanel(world: MutableState<WorldState>, latest: MutableState<LatestInputs>) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .statusBarsPadding()
-            .padding(12.dp)
-    ) {
-        Button(onClick = {
-            latest.value.gps?.let { g ->
-                world.value = world.value.copy(targetBrakePoint = LatLon(g.lat, g.lon))
-            }
-        }) { Text("Dev: Set TBP = Here") }
-
-        Button(onClick = {
-            world.value = world.value.copy(targetBrakePoint = null)
-        }) { Text("Dev: Clear TBP") }
     }
 }
 
@@ -1014,10 +1184,30 @@ private fun updateCandidateBrakePoint(
 
 // Wrapper to keep the 10 Hz loop tidy.
 // Decides whether to capture a brake point and returns the updated WorldState.
+// Decides whether to capture a brake point and returns the updated WorldState.
 private fun updateBrakePointState(
     world: WorldState,
     track: Track
 ): WorldState {
+
+    // --- NEW: consume interpolated candidate if one exists ---
+    world.interpolatedCandidate?.let { ic ->
+        val cand = world.candidateBrakePts[ic.cornerIdx]
+        if (cand == null) {
+            val updated: MutableMap<Int, LatLon> = world.candidateBrakePts.toMutableMap()
+            updated[ic.cornerIdx] = ic.pt
+            return world.copy(
+                candidateBrakePts = updated,
+                interpolatedCandidate = null,
+                lastBrakeCaptureNote = "Captured (interp) C${ic.cornerIdx + 1}"
+            )
+        } else {
+            // already had one; just clear the handoff
+            return world.copy(interpolatedCandidate = null)
+        }
+    }
+    // --- END of new block ---
+
     val fix = world.currentLatLon ?: return world
 
     val res = updateCandidateBrakePoint(
@@ -1030,8 +1220,10 @@ private fun updateBrakePointState(
         current              = fix
     )
 
-    return if (res.lastBrakeCaptureNote == null &&
-        res.candidateBrakePts === world.candidateBrakePts) {
+    return if (
+        res.lastBrakeCaptureNote == null &&
+        res.candidateBrakePts === world.candidateBrakePts
+    ) {
         world
     } else {
         world.copy(
@@ -1040,6 +1232,7 @@ private fun updateBrakePointState(
         )
     }
 }
+
 
 private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
     val fix = world.currentLatLon ?: return null
