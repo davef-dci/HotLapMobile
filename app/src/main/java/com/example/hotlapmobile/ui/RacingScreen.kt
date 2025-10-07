@@ -54,6 +54,14 @@ import androidx.compose.ui.unit.toSize
 
 import com.example.hotlapmobile.config.LatLon
 
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+
 
 
 
@@ -143,12 +151,14 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 data class GpsFix(
     val lat: Double,
     val lon: Double,
-    val tMillis: Long  // from android.os.SystemClock.elapsedRealtime()
+    val tMillis: Long,
+    val speedMps: Float = 0f // from android.os.SystemClock.elapsedRealtime()
 )
 
  //LatestInputs holds the most recent sensor readings we care about.
 data class LatestInputs(
     val gps: GpsFix? = null,
+    val prevGps: GpsFix? = null,
     val longG: Float? = null      // longitudinal accel in g, projected on calibrated forward
 )
 
@@ -180,7 +190,18 @@ data class WorldState(
     val currentLatLon: LatLon? = null,
 
 // braking phase flag for this tick (set by your detector elsewhere)
-    val isBrakingNow: Boolean = false
+    val isBrakingNow: Boolean = false,
+
+    val targetBrakePoint: LatLon? = null, // NEW: recorded brake point of the current target corner
+
+    // NEW: snapshot captured at the most recent valid GPS fix
+    val lastFixTimeMs: Long? = null,
+    val lastFixDistToBP_M: Double? = null,
+    val lastFixSpeedMps: Double? = null,
+
+    val countdownShow: Boolean = false,
+    val countdownSeconds: Int? = null,  // 0..N
+    val countdownRingFrac: Float? = null  // 0f..1f
 )
 
 
@@ -217,7 +238,10 @@ fun rememberWorldState(): MutableState<WorldState> =
  */
 @android.annotation.SuppressLint("MissingPermission")
 @Composable
-private fun GpsProducer(latest: MutableState<LatestInputs>) {
+private fun GpsProducer(
+    latest: MutableState<LatestInputs>,
+    world: MutableState<WorldState>   // NEW
+) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
     DisposableEffect(Unit) {
@@ -229,18 +253,89 @@ private fun GpsProducer(latest: MutableState<LatestInputs>) {
             200L // request ~5 Hz; Android will coalesce as needed
         ).setMinUpdateIntervalMillis(200L).build()
 
+
+
+
         val cb = object : com.google.android.gms.location.LocationCallback() {
             override fun onLocationResult(res: com.google.android.gms.location.LocationResult) {
                 val loc = res.lastLocation ?: return
+
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+
+
+
+                val tbp = world.value.targetBrakePoint
+                if (tbp == null) android.util.Log.d("GPS", "dist→BrakePoint = (none)")
+
+                tbp?.let { bp ->
+                    val dToBP = haversineMeters(loc.latitude, loc.longitude, bp.lat, bp.lon)
+                    android.util.Log.d("GPS", "dist→BrakePoint = ${"%.1f".format(dToBP)} m")
+
+                    world.value = world.value.copy(
+                        lastFixTimeMs = nowMs,
+                        lastFixDistToBP_M = dToBP,
+                        lastFixSpeedMps = loc.speed.toDouble()
+                    )
+
+                    android.util.Log.d(
+                        "GPS",
+                        "Snap(last): t=${nowMs}, dBP=${"%.1f".format(dToBP)} m, v=${"%.2f".format(loc.speed)} m/s"
+                    )
+                }
+
+                android.util.Log.d(
+                    "GPS",
+                    "Fix: lat=${loc.latitude}, lon=${loc.longitude}, speed=${"%.2f".format(loc.speed)}, time=$nowMs"
+                )
+                val prev = latest.value.gps   // grab current (will become previous)
+                // ---------------------------
+
+                // If we have a previous fix, compute between-fix distance & segment speed
+                prev?.let { p ->
+                    val dMeters = haversineMeters(p.lat, p.lon, loc.latitude, loc.longitude)
+                    val dtSec = (nowMs - p.tMillis) / 1000.0
+                    if (dtSec > 0.0) {
+                        val segSpeedMps = dMeters / dtSec
+                        android.util.Log.d(
+                            "GPS",
+                            "segΔ: d=${"%.1f".format(dMeters)} m, dt=${"%.2f".format(dtSec)} s, v=${"%.2f".format(segSpeedMps)} m/s"
+                        )
+                    }
+                    //calculate the bearing between the previous and current GPS fix
+                    val segBearing = bearingDeg(p.lat, p.lon, loc.latitude, loc.longitude)
+                    android.util.Log.d(
+                        "GPS",
+                        "segBearing=${"%.1f".format(segBearing)}°"
+                    )
+
+                }
+
+
+//capture and save teh previous value.
                 latest.value = latest.value.copy(
+                    prevGps = prev,
                     gps = GpsFix(
                         lat = loc.latitude,
                         lon = loc.longitude,
-                        tMillis = android.os.SystemClock.elapsedRealtime()
+                        tMillis = nowMs,
+                        speedMps = loc.speed
                     )
                 )
+
+
+
+                android.util.Log.d(
+                    "GPS",
+                    "prevGps is ${if (latest.value.prevGps == null) "null" else "set"}"
+                )
+
+
+
             }
+
         }
+
+
 
         fused.requestLocationUpdates(req, cb, ctx.mainLooper)
         onDispose { fused.removeLocationUpdates(cb) }
@@ -271,6 +366,12 @@ fun RacingScreen() {
     val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
     val track = selectedTrack ?: Tracks.DcfNeighborhood   // fallback if none chosen
 
+
+
+
+    val brakeWarnTimeS = track.brakeWarnTimeS
+
+
     //context for braking and accelerating
     val prefsRepo = remember(context) { PrefsRepo(context) }
     val brakeThreshG = prefsRepo.brakeThreshG
@@ -283,7 +384,7 @@ fun RacingScreen() {
     AccelProducer(latest)
 
     // Start GPS producer
-    GpsProducer(latest)
+    GpsProducer(latest, world)
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -306,6 +407,38 @@ fun RacingScreen() {
 
             // 5) Any other per-tick bookkeeping you keep (optional)
             // phase = phaseNow   // if you show it elsewhere
+
+            // Use the recorded fastest brake point for the current target corner (if any)
+            val tbp = world.value.fastestBrakePts[world.value.targetCornerIdx]
+            if (tbp != world.value.targetBrakePoint) {
+                world.value = world.value.copy(targetBrakePoint = tbp)
+            }
+
+            //extrapolating from last GPS fix to time to brake
+            val tToBrake = extrapolatedTimeToBrake(world.value)
+            if (tToBrake != null) {
+                val out = countdownFrom(tToBrake, track.brakeWarnTimeS)
+                world.value = world.value.copy(
+                    countdownShow = out.show,
+                    countdownSeconds = if (out.show) out.secondsInt else null,
+                    countdownRingFrac = if (out.show) out.ringFrac.coerceIn(0f, 1f) else null
+                )
+            } else {
+                // hide when we don’t have a valid estimate
+                world.value = world.value.copy(
+                    countdownShow = false,
+                    countdownSeconds = null,
+                    countdownRingFrac = null
+                )
+            }
+
+
+
+
+
+
+
+
             ticks++
 
             delay(100L)
@@ -315,21 +448,36 @@ fun RacingScreen() {
     // ---- UI: two pages
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
 
-    HorizontalPager(
-        state = pagerState,
-        modifier = Modifier.fillMaxSize()
-    ) { page ->
-        when (page) {
-            0 -> RacingUi(world = world.value, track = track, g=latest.value.longG ?: 0f)
-            1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track, phase = phase, brakeThreshG = brakeThreshG)
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 👇 Dev buttons row at the top
+        DevPanel(world = world, latest = latest)
+
+        // 👇 Pager takes the rest of the space
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) { page ->
+            when (page) {
+                0 -> RacingUi(world = world.value, track = track, g = latest.value.longG ?: 0f)
+                1 -> DebugUi(
+                    ticks = ticks,
+                    latest = latest.value,
+                    world = world.value,
+                    track = track,
+                    phase = phase,
+                    brakeThreshG = brakeThreshG
+                )
+            }
         }
     }
+
 
 }
 
 
 /*
- * RacingUi: placeholder for the real racing HUD.
  *
  * Purpose:
  * - Placeholder only; we'll build the countdown UI later.
@@ -355,6 +503,16 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
         ) {
             BrakePointDots(track = track, world = world)
         }
+
+
+        if (world.countdownShow && world.countdownSeconds != null) {
+            Text(
+                text = "${world.countdownSeconds}",
+                fontSize = 80.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
 
 
 // RIGHT: one combined indicator (bar behind, gray box on top)
@@ -403,6 +561,8 @@ private fun DebugUi(
 ) {
     val gps = latest.gps
     val ageMs = gps?.let { android.os.SystemClock.elapsedRealtime() - it.tMillis }
+    val brakeWarnTimeS = track.brakeWarnTimeS
+
 
     androidx.compose.foundation.layout.Column(
         modifier = Modifier
@@ -460,9 +620,40 @@ private fun DebugUi(
         Text("Brake warn distance: ${"%.0f m".format(track.brakeWarnDistanceM)}")
         Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
 
+        Text(
+            text = "Brake Warn Time: ${"%.1f".format(brakeWarnTimeS)} s",
+            color = Color.Gray,
+            fontSize = 14.sp
+        )
+
+        Text("TBP: ${if (world.targetBrakePoint == null) "none" else "set"}")
+
+
 
     }
 }
+
+@Composable
+private fun DevPanel(world: MutableState<WorldState>, latest: MutableState<LatestInputs>) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .statusBarsPadding()
+            .padding(12.dp)
+    ) {
+        Button(onClick = {
+            latest.value.gps?.let { g ->
+                world.value = world.value.copy(targetBrakePoint = LatLon(g.lat, g.lon))
+            }
+        }) { Text("Dev: Set TBP = Here") }
+
+        Button(onClick = {
+            world.value = world.value.copy(targetBrakePoint = null)
+        }) { Text("Dev: Clear TBP") }
+    }
+}
+
+
 
 @Composable
 private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
@@ -509,19 +700,10 @@ private fun updateStartZone(
     )
 }
 
-//Rising-edge latch to increment lapCount at Start/Finish.
+// Rising-edge latch only: just carry wasInStartZone forward.
+// Do NOT touch lapCount or lastSfEnterMs here.
 private fun updateLapOnStartZone(world: WorldState): WorldState {
-    val now = android.os.SystemClock.elapsedRealtime()
-    val allowed = isEnteringAllowed(world, now)
-    val newLap = if (allowed) world.lapCount + 1 else world.lapCount
-    val newLast = if (allowed) now else world.lastSfEnterMs
-
-    // Always advance the latch so rising-edge detection works next tick
-    return world.copy(
-        lapCount = newLap,
-        wasInStartZone = world.inStartZone,
-        lastSfEnterMs = newLast
-    )
+    return world.copy(wasInStartZone = world.inStartZone)
 }
 
 
@@ -549,7 +731,6 @@ private fun startLapOnFirstCrossing(world: WorldState): WorldState {
 }
 
 
-// Finish a lap on subsequent Start/Finish crossings.
 private fun finishLapOnCrossing(world: WorldState): WorldState {
     val start = world.currentLapStartMs ?: return world
     val now = android.os.SystemClock.elapsedRealtime()
@@ -559,17 +740,17 @@ private fun finishLapOnCrossing(world: WorldState): WorldState {
     val wasBest = (world.bestLapMs == null) || (lapMs < world.bestLapMs!!)
     val newBest = world.bestLapMs?.let { kotlin.math.min(it, lapMs) } ?: lapMs
 
-    // rollover timing to next lap
     val rolled = world.copy(
+        lapCount = world.lapCount + 1,     // 🔹 move lap increment here
         bestLapMs = newBest,
-        currentLapStartMs = now,      // immediately start next lap
+        currentLapStartMs = now,           // immediately start next lap
         currentLapElapsedMs = 0L,
         lastSfEnterMs = now
     )
 
-    // promote brake candidates on PB; always clear candidates after a lap
     return promoteBrakeCandidatesIfPB(rolled, wasBest)
 }
+
 
 
 
@@ -589,11 +770,11 @@ private fun checkIfAtStartFinish(
     track: Track
 ): WorldState {
     var w = world
-    w = updateStartZone(inputs, w, track)   // 1) compute inStartZone / dist
-    w = updateLapOnStartZone(w)             // 2) latch rising edge (uses *previous* lastSfEnterMs)
-    w = finishLapOnCrossing(w)              // 3) possibly close lap (may set lastSfEnterMs)
-    w = startLapOnFirstCrossing(w)          // 4) possibly start timing (may set lastSfEnterMs)
-    w = tickUpdateLapElapsed(w)             // 5) update elapsed
+    w = updateStartZone(inputs, w, track)   // compute inStartZone
+    w = startLapOnFirstCrossing(w)          // start timing on the very first crossing
+    w = finishLapOnCrossing(w)              // close subsequent laps
+    w = updateLapOnStartZone(w)             // carry latch forward
+    w = tickUpdateLapElapsed(w)             // update running time
     return w
 }
 
@@ -908,3 +1089,57 @@ private fun BrakePointDots(track: Track, world: WorldState) {
     }
 }
 
+
+private fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val φ1 = Math.toRadians(lat1)
+    val φ2 = Math.toRadians(lat2)
+    val Δλ = Math.toRadians(lon2 - lon1)
+    val y = Math.sin(Δλ) * Math.cos(φ2)
+    val x = Math.cos(φ1) * Math.cos(φ2) * Math.cos(Δλ) - Math.sin(φ1) * Math.sin(φ2)
+    var θ = Math.toDegrees(Math.atan2(y, x))
+    if (θ < 0) θ += 360.0
+    return θ
+}
+
+
+private fun extrapolatedTimeToBrake(world: WorldState): Double? {
+    val tFix = world.lastFixTimeMs ?: run {
+        android.util.Log.d("BRAKE", "skip: no lastFixTimeMs")
+        return null
+    }
+    val dFix = world.lastFixDistToBP_M ?: run {
+        android.util.Log.d("BRAKE", "skip: no lastFixDistToBP_M")
+        return null
+    }
+    val vFix = world.lastFixSpeedMps ?: run {
+        android.util.Log.d("BRAKE", "skip: no lastFixSpeedMps")
+        return null
+    }
+    if (vFix <= 0.01) {  // very low so indoor tests work
+        android.util.Log.d("BRAKE", "skip: vFix too small ($vFix m/s)")
+        return null
+    }
+
+    val nowMs = android.os.SystemClock.elapsedRealtime()
+    val dt = (nowMs - tFix) / 1000.0
+    val dNow = (dFix - vFix * dt).coerceAtLeast(0.0)
+    val t = dNow / vFix
+    android.util.Log.d("BRAKE", "ok: dFix=${"%.2f".format(dFix)} dNow=${"%.2f".format(dNow)} vFix=${"%.2f".format(vFix)} t=${"%.2f".format(t)}")
+    return t
+}
+
+private data class CountdownOut(
+    val show: Boolean,
+    val secondsInt: Int,   // 0..N
+    val ringFrac: Float    // 0.0..1.0 (0 = just ticked over to new second, 1 = almost next)
+)
+
+private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
+    if (tToBrake > warnTimeS) return CountdownOut(false, 0, 0f)
+    if (tToBrake < 0.0) return CountdownOut(true, 0, 1f) // already at/inside BP
+    val secondsInt = kotlin.math.floor(tToBrake).toInt()
+    val fracWithinSecond = (tToBrake - secondsInt).toFloat() // 0.00..0.99
+    // Map “fraction of second remaining” → ring sweep (1.0 = full circle, 0.0 = just ticked)
+    val ringFrac = 1f - fracWithinSecond
+    return CountdownOut(true, secondsInt, ringFrac)
+}
