@@ -97,7 +97,7 @@ fun MainMenu(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Hot Lap Mobile - V.1",
+            text = "Hot Lap Mobile - V1.1",
             style = MaterialTheme.typography.headlineLarge,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()

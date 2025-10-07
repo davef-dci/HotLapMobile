@@ -52,6 +52,8 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.unit.toSize
 
+import com.example.hotlapmobile.config.LatLon
+
 
 
 
@@ -166,7 +168,19 @@ data class WorldState(
     // --- Corner detection (Lua parity) ---
     val atCorner: Boolean = false,
     val targetCornerIdx: Int = 0,          // 0-based
-    val distToTargetCornerM: Double? = null
+    val distToTargetCornerM: Double? = null,
+
+    // --- Brake-point scaffolding ---
+    val candidateBrakePts: Map<Int, LatLon> = emptyMap(),
+    val fastestBrakePts: Map<Int, LatLon> = emptyMap(),
+    val lastBrakeCaptureNote: String? = null,
+
+
+    // current GPS fix (nullable until your pipeline sets it each tick)
+    val currentLatLon: LatLon? = null,
+
+// braking phase flag for this tick (set by your detector elsewhere)
+    val isBrakingNow: Boolean = false
 )
 
 
@@ -271,17 +285,32 @@ fun RacingScreen() {
     // Start GPS producer
     GpsProducer(latest)
 
-    // 10 Hz loop (runs in background coroutine)
     LaunchedEffect(Unit) {
         while (true) {
-            world.value = checkIfAtStartFinish(latest.value, world.value, track) // check if at start finish
+            // 1) Start/Finish + corner
+            world.value = checkIfAtStartFinish(latest.value, world.value, track)
             world.value = updateCornerState(latest.value, world.value, track)
-            phase = detectDrivePhase(latest.value.longG, brakeThreshG) // check if accelerating or braking
+
+            // 2) Detect phase for this tick
+            val phaseNow = detectDrivePhase(latest.value.longG, brakeThreshG)
+
+            // 3) Update world with current GPS fix + braking flag
+            val fix = latest.value.gps
+            world.value = world.value.copy(
+                currentLatLon = fix?.let { LatLon(it.lat, it.lon) },
+                isBrakingNow = (phaseNow == DrivePhase.BRAKING)
+            )
+
+            // 4) Try capturing a candidate brake point (tidy one-liner)
+            world.value = updateBrakePointState(world.value, track)
+
+            // 5) Any other per-tick bookkeeping you keep (optional)
+            // phase = phaseNow   // if you show it elsewhere
             ticks++
+
             delay(100L)
         }
     }
-
 
     // ---- UI: two pages
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
@@ -317,6 +346,15 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
                 .align(Alignment.TopCenter)
                 .padding(top = 12.dp)
         )
+
+        // NEW: corner dots near the top
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 40.dp)
+        ) {
+            BrakePointDots(track = track, world = world)
+        }
 
 
 // RIGHT: one combined indicator (bar behind, gray box on top)
@@ -408,6 +446,21 @@ private fun DebugUi(
         Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
         Text("At corner: ${world.atCorner}")
 
+        Text("Fastest brake pt for target? " +
+                if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no")
+        Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
+
+        Text("Target corner: ${world.targetCornerIdx+1}")
+        Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
+        Text("At corner: ${world.atCorner}")
+
+// --- New brake-point debug ---
+        val dFast = distToTargetFastestBrakePoint(world)?.let { "%.1f m".format(it) } ?: "--"
+        Text("Dist to target brake pt: $dFast")
+        Text("Brake warn distance: ${"%.0f m".format(track.brakeWarnDistanceM)}")
+        Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
+
+
     }
 }
 
@@ -447,6 +500,8 @@ private fun updateStartZone(
         track.startFinish.lat, track.startFinish.lon
     )
     val inZone = d <= track.startFinishRadiusM
+
+
 
     return world.copy(
         distToStartM = d,
@@ -494,21 +549,28 @@ private fun startLapOnFirstCrossing(world: WorldState): WorldState {
 }
 
 
-//Finish a lap on subsequent Start/Finish crossings.
+// Finish a lap on subsequent Start/Finish crossings.
 private fun finishLapOnCrossing(world: WorldState): WorldState {
     val start = world.currentLapStartMs ?: return world
     val now = android.os.SystemClock.elapsedRealtime()
     if (!isEnteringAllowed(world, now)) return world
 
     val lapMs = now - start
+    val wasBest = (world.bestLapMs == null) || (lapMs < world.bestLapMs!!)
     val newBest = world.bestLapMs?.let { kotlin.math.min(it, lapMs) } ?: lapMs
-    return world.copy(
+
+    // rollover timing to next lap
+    val rolled = world.copy(
         bestLapMs = newBest,
         currentLapStartMs = now,      // immediately start next lap
         currentLapElapsedMs = 0L,
         lastSfEnterMs = now
     )
+
+    // promote brake candidates on PB; always clear candidates after a lap
+    return promoteBrakeCandidatesIfPB(rolled, wasBest)
 }
+
 
 
 //(Lap Timer UI): Add a millisecond→text formatter.
@@ -524,14 +586,14 @@ private fun formatMs(ms: Long?): String {
 private fun checkIfAtStartFinish(
     inputs: LatestInputs,
     world: WorldState,
-    track: com.example.hotlapmobile.config.Track
+    track: Track
 ): WorldState {
     var w = world
-    w = updateStartZone(inputs, w, track)  // 1
-    w = finishLapOnCrossing(w)             // 2
-    w = startLapOnFirstCrossing(w)         // 3
-    w = updateLapOnStartZone(w)            // 4
-    w = tickUpdateLapElapsed(w)            // 5
+    w = updateStartZone(inputs, w, track)   // 1) compute inStartZone / dist
+    w = updateLapOnStartZone(w)             // 2) latch rising edge (uses *previous* lastSfEnterMs)
+    w = finishLapOnCrossing(w)              // 3) possibly close lap (may set lastSfEnterMs)
+    w = startLapOnFirstCrossing(w)          // 4) possibly start timing (may set lastSfEnterMs)
+    w = tickUpdateLapElapsed(w)             // 5) update elapsed
     return w
 }
 
@@ -707,4 +769,142 @@ private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
     }
 }
 
+
+// Lua-parity helper: decide if we should capture a brake point *now* for the target corner.
+// Pure function: no side effects.
+private fun shouldCaptureBrakeForCorner(
+    phaseIsBraking: Boolean,          // from your drive-phase detector
+    atCorner: Boolean,                // world.atCorner (within tight corner tolerance)
+    distToTargetCornerM: Double?,     // world.distToTargetCornerM
+    brakeZoneDistanceM: Double,       // track.brakeZoneDistanceM (Lua: brake_zone_distance)
+    alreadyHasCandidate: Boolean      // world.candidateBrakePts.containsKey(targetCornerIdx)
+): Boolean {
+    if (!phaseIsBraking) return false
+    if (alreadyHasCandidate) return false
+
+    val d = distToTargetCornerM ?: return false
+    if (d.isNaN() || d.isInfinite()) return false
+
+    // Lua: capture when IN brake zone + braking; Kotlin: require we're not *at* the corner yet.
+    // This prevents grabs inside the corner tolerance while preserving the Lua "in zone" behavior.
+    return (d <= brakeZoneDistanceM) && !atCorner
+}
+
+
+// Result of attempting a candidate capture
+private data class CandidateUpdateResult(
+    val candidateBrakePts: Map<Int, LatLon>,
+    val lastBrakeCaptureNote: String?
+)
+
+// Store a first-time candidate brake point for the *current* target corner.
+// Pure: returns updated map + optional debug note. No WorldState dependency.
+private fun updateCandidateBrakePoint(
+    targetCornerIdx: Int,
+    atCorner: Boolean,
+    distToTargetCornerM: Double?,
+    phaseIsBraking: Boolean,
+    brakeZoneDistanceM: Double,
+    candidateBrakePts: Map<Int, LatLon>,
+    current: LatLon
+): CandidateUpdateResult {
+    // Validate corner index
+    if (targetCornerIdx < 0) return CandidateUpdateResult(candidateBrakePts, null)
+
+    // Decide whether to capture (Lua-parity logic)
+    val alreadyHasCandidate = candidateBrakePts.containsKey(targetCornerIdx)
+    val capture = shouldCaptureBrakeForCorner(
+        phaseIsBraking = phaseIsBraking,
+        atCorner = atCorner,
+        distToTargetCornerM = distToTargetCornerM,
+        brakeZoneDistanceM = brakeZoneDistanceM,
+        alreadyHasCandidate = alreadyHasCandidate
+    )
+    if (!capture) return CandidateUpdateResult(candidateBrakePts, null)
+
+    // Record first capture for this corner this lap
+    val updated = candidateBrakePts.toMutableMap().apply { put(targetCornerIdx, current) }
+
+    fun fmt(v: Double) = "%.6f".format(v)
+    val note = "Captured C$targetCornerIdx at ${fmt(current.lat)},${fmt(current.lon)}"
+
+    return CandidateUpdateResult(updated, note)
+}
+
+// Wrapper to keep the 10 Hz loop tidy.
+// Decides whether to capture a brake point and returns the updated WorldState.
+private fun updateBrakePointState(
+    world: WorldState,
+    track: Track
+): WorldState {
+    val fix = world.currentLatLon ?: return world
+
+    val res = updateCandidateBrakePoint(
+        targetCornerIdx      = world.targetCornerIdx,
+        atCorner             = world.atCorner,
+        distToTargetCornerM  = world.distToTargetCornerM,
+        phaseIsBraking       = world.isBrakingNow,
+        brakeZoneDistanceM   = track.brakeZoneDistanceM,
+        candidateBrakePts    = world.candidateBrakePts,
+        current              = fix
+    )
+
+    return if (res.lastBrakeCaptureNote == null &&
+        res.candidateBrakePts === world.candidateBrakePts) {
+        world
+    } else {
+        world.copy(
+            candidateBrakePts = res.candidateBrakePts,
+            lastBrakeCaptureNote = res.lastBrakeCaptureNote ?: world.lastBrakeCaptureNote
+        )
+    }
+}
+
+private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
+    val fix = world.currentLatLon ?: return null
+    val bp  = world.fastestBrakePts[world.targetCornerIdx] ?: return null
+    return haversineMeters(fix.lat, fix.lon, bp.lat, bp.lon)
+}
+
+// If `isPB` is true, promote all candidates → fastest; always clear candidates afterward.
+private fun promoteBrakeCandidatesIfPB(world: WorldState, isPB: Boolean): WorldState {
+    val promotedCount = if (isPB) world.candidateBrakePts.size else 0
+    val newFastest = if (isPB) {
+        world.fastestBrakePts.toMutableMap().apply { putAll(world.candidateBrakePts) }
+    } else {
+        world.fastestBrakePts
+    }
+    val note = if (isPB) "Promoted $promotedCount brake point(s)" else null
+    return world.copy(
+        fastestBrakePts = newFastest,
+        candidateBrakePts = emptyMap(),                // start fresh for the next lap
+        lastBrakeCaptureNote = note ?: world.lastBrakeCaptureNote
+    )
+}
+
+
+@Composable
+private fun BrakePointDots(track: Track, world: WorldState) {
+    Spacer(Modifier.height(8.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .wrapContentHeight()
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        track.corners.forEachIndexed { i, _ ->
+            val recorded = world.candidateBrakePts.containsKey(i)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "C${i + 1}", fontSize = 18.sp)
+                Text(
+                    text = "●",
+                    fontSize = 38.sp,
+                    color = if (recorded) Color(0xFF22C55E) else Color.Gray
+                )
+            }
+        }
+    }
+}
 
