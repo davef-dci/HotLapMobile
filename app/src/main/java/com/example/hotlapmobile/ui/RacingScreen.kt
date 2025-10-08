@@ -57,6 +57,7 @@ import com.example.hotlapmobile.config.LatLon
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
 
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +69,37 @@ import androidx.compose.ui.unit.dp
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
+
+
+// STEP 8: Dot product of two 3D vectors (utility for projections)
+private fun dot(a: FloatArray, b: FloatArray): Float =
+    a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+// STEP 8: Cross product of two 3D vectors (utility to compute lateral axis)
+private fun cross(a: FloatArray, b: FloatArray): FloatArray =
+    floatArrayOf(
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    )
+
+// STEP 8: Normalize a 3D vector (utility to get unit vectors)
+private fun normalize(v: FloatArray): FloatArray {
+    val m = kotlin.math.sqrt((v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).toDouble()).toFloat()
+    return if (m == 0f) floatArrayOf(0f, 0f, 0f) else floatArrayOf(v[0]/m, v[1]/m, v[2]/m)
+}
+
+// STEP 8: Compute lateral g from linear acceleration, forward unit, and gravity
+private fun computeLateralG(
+    linearAcc: FloatArray,        // m/s^2 from TYPE_LINEAR_ACCELERATION (gravity removed)
+    forwardUnit: FloatArray,      // unit vector pointing "forward" (from your calibration)
+    gravity: FloatArray           // m/s^2 from TYPE_GRAVITY (used only to derive "up")
+): Float {
+    val upUnit = normalize(gravity)                         // derive "up" from gravity
+    val lateral = normalize(cross(upUnit, forwardUnit))     // lateral axis = up × forward
+    val proj = dot(linearAcc, lateral)                      // project accel onto lateral axis
+    return proj / 9.80665f                                  // convert m/s^2 → g's
+}
 
 
 // STEP: Always-on circular ring composable (outline-only, fixed pixel conversion)
@@ -105,6 +137,7 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 // --- EMA smoothing state ---
 // Remember previous smoothed value (g) so we can apply low-pass filtering
     var emaG by remember { mutableStateOf<Float?>(null) }
+    var emaLatG by remember { mutableStateOf<Float?>(null) }
 
 // Remember previous sensor timestamp (ns) to make the smoothing time-aware
     var lastTsNs by remember { mutableStateOf<Long?>(null) }
@@ -132,6 +165,21 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
             latest.value = latest.value.copy(longG = null)
             return@DisposableEffect onDispose { }
         }
+
+        // STEP 10a: Listener to keep the latest gravity vector (for lateral axis)
+        val gravityVec = FloatArray(3)
+        val gravityListener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                if (e.sensor.type != Sensor.TYPE_GRAVITY) return
+                gravityVec[0] = e.values[0]
+                gravityVec[1] = e.values[1]
+                gravityVec[2] = e.values[2]
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+
+
 
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
@@ -166,13 +214,55 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 
                 // 4) Publish smoothed g
                 latest.value = latest.value.copy(longG = gSmooth)
+
+
+
+                // STEP 10d: Compute lateral g from current vectors (not publishing yet)
+// STEP 14b: compute + EMA smooth + deadband for lateral g
+                val lat = computeLateralG(
+                    linearAcc   = floatArrayOf(ax, ay, az),
+                    forwardUnit = floatArrayOf(fx, fy, fz),
+                    gravity     = gravityVec
+                )
+
+// clamp spikes like longitudinal
+                val latRaw = lat.coerceIn(-G_CLAMP, G_CLAMP)
+
+// EMA using the same alpha as longitudinal
+                val emaPrevLat = emaLatG ?: latRaw
+                val emaNowLat  = emaPrevLat + alpha * (latRaw - emaPrevLat)
+                emaLatG = emaNowLat
+
+// deadband around zero for stability
+                val latSmooth = if (kotlin.math.abs(emaNowLat) < DEAD_BAND_G) 0f else emaNowLat
+
+// publish smoothed lateral g
+                latest.value = latest.value.copy(latG = latSmooth)
+
+
+
+// (next step we'll store this in LatestInputs and show it in the UI)
+
+
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
+// STEP 10b-fix: get the gravity sensor
+        val grav = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
+
+// existing linear accel registration
         sm.registerListener(listener, lin, SensorManager.SENSOR_DELAY_GAME)
-        onDispose { sm.unregisterListener(listener) }
+
+// STEP 10c: start receiving gravity updates
+        sm.registerListener(gravityListener, grav, SensorManager.SENSOR_DELAY_GAME)
+
+        onDispose {
+            sm.unregisterListener(listener)
+            sm.unregisterListener(gravityListener) // also unregister gravity
+        }
+
     }
 }
 
@@ -186,8 +276,9 @@ data class GpsFix(
  //LatestInputs holds the most recent sensor readings we care about.
 data class LatestInputs(
     val gps: GpsFix? = null,
-    val longG: Float? = null      // longitudinal accel in g, projected on calibrated forward
-)
+    val longG: Float? = null,      // longitudinal accel in g, projected on calibrated forward
+    val latG:  Float? = null,
+ )
 
 //Prepare fields we'll need for S/F detection and lap counting.
 data class WorldState(
@@ -383,7 +474,7 @@ fun RacingScreen() {
         modifier = Modifier.fillMaxSize()
     ) { page ->
         when (page) {
-            0 -> RacingUi(world = world.value, track = track, g=latest.value.longG ?: 0f)
+            0 -> RacingUi(world = world.value, track = track, g = latest.value.longG ?: 0f, latG = latest.value.latG)
             1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track, phase = phase, brakeThreshG = brakeThreshG)
         }
     }
@@ -398,7 +489,7 @@ fun RacingScreen() {
  * - Placeholder only; we'll build the countdown UI later.
  */
 @Composable
-private fun RacingUi(world: WorldState, track: Track, g: Float) {
+private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = null) {
     Box(modifier = Modifier.fillMaxSize()) {
 
         // TOP: Track name
@@ -426,29 +517,42 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
         val sec  = world.countdownSeconds
 
 
-        // STEP: Always-on ring + optional countdown number (no segmented sweep)
+// Center: ring with countdown text on top + lateral bar below
         Box(Modifier.align(Alignment.Center)) {
-            CountdownRing(size = 400.dp, strokeDp = 36.dp, color = Color.Gray)
             val show = world.countdownShow
             val sec  = world.countdownSeconds
-            if (show && sec != null) {
-                Text(
-                    text = sec.toString(),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 350.sp,
-                    modifier = Modifier.align(Alignment.Center)
-                )
+            var lateralG by remember { mutableStateOf(0.4f) }  // start with a visible fake value
+
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // STEP 6b: ring + text layered together
+                Box(contentAlignment = Alignment.Center) {
+                    CountdownRing(size = 400.dp, strokeDp = 36.dp, color = Color.Gray)
+                    if (show && sec != null) {
+                    //if (true) {
+                        Text(
+                            text = sec.toString(),
+                            //text = 5.toString(),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 350.sp
+                        )
+                    }
+                    Box( modifier = Modifier .align(Alignment.CenterEnd) .padding(end = 12.dp) ) {
+                        RightGIndicator(g = g, maxAbs = 0.5f)
+                    }
+
+                }
+
+                Spacer(Modifier.height(1.dp))
+                // STEP 6c: Show the lateral G bar under the ring (fake value for now)
+                LateralGBar(valueG = (latG ?: 0f), modifier = Modifier.width(320.dp))
+
+
             }
         }
 
-        // RIGHT: one combined indicator (bar behind, gray box on top)
-        Box(
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 12.dp)
-        ) {
-            RightGIndicator(g = g, maxAbs = 0.5f) // tighter range so you can see movement easily
-        }
+
+
+
 
 
 
@@ -839,7 +943,7 @@ private fun GArrowBar(
 ) {
     Canvas(
         modifier = modifier
-            .width(90.dp)
+            .width(40.dp)
             .height(220.dp)
     ) {
         val w = size.width
@@ -905,6 +1009,58 @@ private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
         )
     }
 }
+
+// STEP 7: Replace LateralGBar with version that fills from center left/right
+@Composable
+fun LateralGBar(
+    valueG: Float = 0f,          // current lateral g (− = left, + = right)
+    maxAbsG: Float = 1.5f,       // full-scale range in g’s
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Gray),   // gray background
+        contentAlignment = Alignment.Center
+    ) {
+        // --- draw green fill from screen center
+        Canvas(modifier = Modifier.matchParentSize()) {
+            val clamped = valueG.coerceIn(-maxAbsG, maxAbsG)
+            val frac = kotlin.math.abs(clamped) / maxAbsG
+            val cx = size.width / 2f
+            val w = size.width * frac
+            val h = size.height
+
+            if (clamped > 0f) {
+                // positive → fill to the right
+                drawRect(
+                    color = Color(0xFF22C55E),
+                    topLeft = Offset(cx, 0f),
+                    size = Size(w, h)
+                )
+            } else if (clamped < 0f) {
+                // negative → fill to the left
+                drawRect(
+                    color = Color(0xFF22C55E),
+                    topLeft = Offset(cx - w, 0f),
+                    size = Size(w, h)
+                )
+            }
+        }
+
+        // --- centered text readout on top
+        Text(
+            text = String.format("%.1f g", valueG),
+            color = Color.White,
+            fontSize = 18.sp
+        )
+    }
+}
+
+
+
 
 
 // Lua-parity helper: decide if we should capture a brake point *now* for the target corner.
@@ -1043,7 +1199,7 @@ private fun BrakePointDots(track: Track, world: WorldState) {
 private data class CountdownOut(
     val show: Boolean,
     val secondsInt: Int = 0,
-    // val ringFrac: Float = 0f
+
 )
 
 /** Convert time-to-brake (seconds) into UI state given a warn window. */
@@ -1078,7 +1234,7 @@ private fun WorldState.resetForTrack(track: Track) = copy(
     lastGpsFix = null,
     countdownShow = false,
     countdownSeconds = null,
-    //countdownRingFrac = null,
+
 
     // (optional) reset lap timing if you want laps to be per-track
     lapCount = 0,
