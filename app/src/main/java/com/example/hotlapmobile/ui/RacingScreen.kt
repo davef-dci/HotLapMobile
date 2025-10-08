@@ -180,7 +180,16 @@ data class WorldState(
     val currentLatLon: LatLon? = null,
 
 // braking phase flag for this tick (set by your detector elsewhere)
-    val isBrakingNow: Boolean = false
+    val isBrakingNow: Boolean = false,
+
+    // --- Countdown (time-to-brake) ---
+    val countdownShow: Boolean = false,
+    val countdownSeconds: Int? = null,        // integer seconds to display (3, 2, 1)
+    val countdownRingFrac: Float? = null,     // 0..1 for ring progress
+
+// helpers to compute t->brake
+    val lastGpsFix: GpsFix? = null,           // for speed calc
+    val prevDistToFastestBP: Double? = null   // to check we’re actually approaching
 )
 
 
@@ -304,6 +313,9 @@ fun RacingScreen() {
             // 4) Try capturing a candidate brake point (tidy one-liner)
             world.value = updateBrakePointState(world.value, track)
 
+            // 5) Update countdown (needs fastestBrakePts, GPS history, and corner targeting)
+            world.value = updateCountdownState(latest.value, world.value, track)
+
             // 5) Any other per-tick bookkeeping you keep (optional)
             // phase = phaseNow   // if you show it elsewhere
             ticks++
@@ -364,6 +376,35 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
                 .padding(end = 12.dp)
         ) {
             RightGIndicator(g = g, maxAbs = 0.5f) // tighter range so you can see movement easily
+        }
+// COUNTDOWN HUD
+        val show = world.countdownShow
+        val sec  = world.countdownSeconds
+        val ring = world.countdownRingFrac
+
+        if (show && sec != null && ring != null) {
+            Box(Modifier.align(Alignment.Center)) {
+                // ring
+                Canvas(Modifier.size(180.dp)) {
+                    val stroke = 12.dp.toPx()
+                    val sweep  = 360f * ring
+                    drawArc(
+                        useCenter = false,
+                        startAngle = -90f,
+                        sweepAngle = sweep,
+                        style = Stroke(width = stroke),
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        topLeft = Offset(stroke, stroke),
+                        size = Size(size.width - 2*stroke, size.height - 2*stroke)
+                    )
+                }
+                // big number
+                Text(
+                    text = sec.toString(),
+                    fontSize = 64.sp,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
         }
 
 
@@ -582,18 +623,23 @@ private fun formatMs(ms: Long?): String {
     return String.format("%d:%02d.%03d", minutes, seconds, millis)
 }
 
-//function to check if we're at the start finish and update the world state accordingly
+// function to check if we're at the start finish and update the world state accordingly
 private fun checkIfAtStartFinish(
     inputs: LatestInputs,
     world: WorldState,
     track: Track
 ): WorldState {
     var w = world
-    w = updateStartZone(inputs, w, track)   // 1) compute inStartZone / dist
-    w = updateLapOnStartZone(w)             // 2) latch rising edge (uses *previous* lastSfEnterMs)
-    w = finishLapOnCrossing(w)              // 3) possibly close lap (may set lastSfEnterMs)
-    w = startLapOnFirstCrossing(w)          // 4) possibly start timing (may set lastSfEnterMs)
-    w = tickUpdateLapElapsed(w)             // 5) update elapsed
+    // 1) compute inStartZone / dist
+    w = updateStartZone(inputs, w, track)
+    // 2) start timing on the very first valid crossing (must happen BEFORE we latch)
+    w = startLapOnFirstCrossing(w)
+    // 3) finish+roll to next lap on subsequent crossings
+    w = finishLapOnCrossing(w)
+    // 4) now latch the rising edge (updates wasInStartZone / lastSfEnterMs if allowed)
+    w = updateLapOnStartZone(w)
+    // 5) update the elapsed display
+    w = tickUpdateLapElapsed(w)
     return w
 }
 
@@ -635,6 +681,54 @@ private fun updateCornerState(
     )
 }
 
+// Tunables for the countdown window
+private const val COUNTDOWN_WARN_TIME_S = 5.0    // show countdown within last 5 seconds
+
+private fun updateCountdownState(
+    latest: LatestInputs,
+    world: WorldState,
+    track: Track
+): WorldState {
+    val fix = latest.gps ?: return world.copy(
+        countdownShow = false,
+        countdownSeconds = null,
+        countdownRingFrac = null
+    )
+
+    // Need a promoted fastest brake point to count down to
+    val distNow = distToTargetFastestBrakePoint(world) ?: return world.copy(
+        lastGpsFix = fix,
+        prevDistToFastestBP = null,
+        countdownShow = false,
+        countdownSeconds = null,
+        countdownRingFrac = null
+    )
+
+    // Compute ground speed from last two GPS fixes
+    val last = world.lastGpsFix
+    val speedMps: Double? = last?.let {
+        val dt = (fix.tMillis - it.tMillis).coerceAtLeast(1L) / 1000.0
+        val d  = haversineMeters(it.lat, it.lon, fix.lat, fix.lon)
+        if (dt > 0.0) d / dt else null
+    }
+
+    // Are we approaching the brake point? (distance decreasing)
+    val approaching = world.prevDistToFastestBP?.let { prev -> distNow < prev } ?: false
+
+    // Time to brake = distance / speed
+    val tToBrake = speedMps?.let { if (it > 0.1) distNow / it else Double.POSITIVE_INFINITY }
+        ?: Double.POSITIVE_INFINITY
+
+    val out = countdownFrom(tToBrake, COUNTDOWN_WARN_TIME_S)
+
+    return world.copy(
+        lastGpsFix = fix,
+        prevDistToFastestBP = distNow,
+        countdownShow = out.show && approaching,
+        countdownSeconds = if (out.show && approaching) out.secondsInt else null,
+        countdownRingFrac = if (out.show && approaching) out.ringFrac.coerceIn(0f, 1f) else null
+    )
+}
 
 
 
@@ -860,11 +954,6 @@ private fun updateBrakePointState(
     }
 }
 
-private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
-    val fix = world.currentLatLon ?: return null
-    val bp  = world.fastestBrakePts[world.targetCornerIdx] ?: return null
-    return haversineMeters(fix.lat, fix.lon, bp.lat, bp.lon)
-}
 
 // If `isPB` is true, promote all candidates → fastest; always clear candidates afterward.
 private fun promoteBrakeCandidatesIfPB(world: WorldState, isPB: Boolean): WorldState {
@@ -908,3 +997,27 @@ private fun BrakePointDots(track: Track, world: WorldState) {
     }
 }
 
+private data class CountdownOut(
+    val show: Boolean,
+    val secondsInt: Int = 0,
+    val ringFrac: Float = 0f
+)
+
+/** Convert time-to-brake (seconds) into UI state given a warn window. */
+private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
+    if (tToBrake.isNaN() || tToBrake.isInfinite()) return CountdownOut(false)
+    if (tToBrake <= 0.0 || tToBrake > warnTimeS)   return CountdownOut(false)
+
+    val secs = kotlin.math.ceil(tToBrake).toInt()          // 2.7s -> "3"
+    val frac = ((warnTimeS - tToBrake) / warnTimeS)
+        .coerceIn(0.0, 1.0)
+        .toFloat()
+    return CountdownOut(true, secs, frac)
+}
+
+/** Distance from current fix to the FASTEST brake point of the target corner. */
+private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
+    val fix = world.currentLatLon ?: return null
+    val bp  = world.fastestBrakePts[world.targetCornerIdx] ?: return null
+    return haversineMeters(fix.lat, fix.lon, bp.lat, bp.lon)
+}
