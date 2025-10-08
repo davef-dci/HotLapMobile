@@ -278,7 +278,21 @@ fun RacingScreen() {
     val context = LocalContext.current
     val trackRepo = remember(context) { TrackRepo(context) }
     val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
-    val track = selectedTrack ?: Tracks.DcfNeighborhood   // fallback if none chosen
+    if (selectedTrack == null) {
+        // Optional: simple loading stub
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Loading track…")
+        }
+        return
+    }
+    val track = selectedTrack
+
+
+    LaunchedEffect(track.name) {
+        world.value = world.value.resetForTrack(track)
+    }
+
+
 
     //context for braking and accelerating
     val prefsRepo = remember(context) { PrefsRepo(context) }
@@ -452,6 +466,7 @@ private fun DebugUi(
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
     ) {
         androidx.compose.material3.Text("DEBUG V1.1", fontSize = 22.sp)
+        Text("Track: ${track.name}  (corners=${track.corners.size})")
         androidx.compose.material3.Text("Tick: $ticks")
         androidx.compose.material3.Text("GPS lat: ${gps?.lat}")
         androidx.compose.material3.Text("GPS lon: ${gps?.lon}")
@@ -483,9 +498,8 @@ private fun DebugUi(
             fontSize = 16.sp
         )
 
-        Text("Target corner: ${world.targetCornerIdx+1}")
-        Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
-        Text("At corner: ${world.atCorner}")
+
+
 
         Text("Fastest brake pt for target? " +
                 if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no")
@@ -498,7 +512,6 @@ private fun DebugUi(
 // --- New brake-point debug ---
         val dFast = distToTargetFastestBrakePoint(world)?.let { "%.1f m".format(it) } ?: "--"
         Text("Dist to target brake pt: $dFast")
-        Text("Brake warn distance: ${"%.0f m".format(track.brakeWarnDistanceM)}")
         Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
 
 
@@ -1021,3 +1034,26 @@ private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
     val bp  = world.fastestBrakePts[world.targetCornerIdx] ?: return null
     return haversineMeters(fix.lat, fix.lon, bp.lat, bp.lon)
 }
+
+private fun WorldState.resetForTrack(track: Track) = copy(
+    // ensure target points at a valid corner
+    targetCornerIdx = 0,
+
+    // clear per-track, per-corner things so we don’t mix tracks
+    candidateBrakePts = emptyMap(),
+    fastestBrakePts = emptyMap(),
+
+    // clear countdown approach history so we don’t “approach” an old BP
+    prevDistToFastestBP = null,
+    lastGpsFix = null,
+    countdownShow = false,
+    countdownSeconds = null,
+    countdownRingFrac = null,
+
+    // (optional) reset lap timing if you want laps to be per-track
+    lapCount = 0,
+    currentLapStartMs = null,
+    currentLapElapsedMs = null,
+    bestLapMs = null,
+    lastSfEnterMs = null
+)
