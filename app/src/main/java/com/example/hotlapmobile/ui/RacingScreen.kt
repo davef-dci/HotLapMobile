@@ -54,10 +54,47 @@ import androidx.compose.ui.unit.toSize
 
 import com.example.hotlapmobile.config.LatLon
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+
+
 
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
+
+
+// STEP: Always-on circular ring composable (outline-only, fixed pixel conversion)
+@Composable
+private fun CountdownRing(
+    size: Dp = 180.dp,
+    strokeDp: Dp = 14.dp,
+    color: Color = Color.Black
+) {
+    Canvas(Modifier.size(size)) {
+        val stroke = strokeDp.toPx()
+        val diameter = size.toPx()
+        drawArc(
+            color = color,
+            startAngle = 0f,
+            sweepAngle = 360f,
+            useCenter = false,
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+            topLeft = Offset(stroke / 2, stroke / 2),
+            size = androidx.compose.ui.geometry.Size(
+                diameter - stroke,
+                diameter - stroke
+            )
+        )
+    }
+}
+
 
 
 //stream the accelerometer sensor and fill longG based on +X axis
@@ -185,7 +222,7 @@ data class WorldState(
     // --- Countdown (time-to-brake) ---
     val countdownShow: Boolean = false,
     val countdownSeconds: Int? = null,        // integer seconds to display (3, 2, 1)
-    val countdownRingFrac: Float? = null,     // 0..1 for ring progress
+    // val countdownRingFrac: Float? = null,     // 0..1 for ring progress
 
 // helpers to compute t->brake
     val lastGpsFix: GpsFix? = null,           // for speed calc
@@ -383,7 +420,28 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
         }
 
 
-// RIGHT: one combined indicator (bar behind, gray box on top)
+
+// COUNTDOWN HUD
+        val show = world.countdownShow
+        val sec  = world.countdownSeconds
+
+
+        // STEP: Always-on ring + optional countdown number (no segmented sweep)
+        Box(Modifier.align(Alignment.Center)) {
+            CountdownRing(size = 400.dp, strokeDp = 36.dp, color = Color.Gray)
+            val show = world.countdownShow
+            val sec  = world.countdownSeconds
+            if (show && sec != null) {
+                Text(
+                    text = sec.toString(),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 350.sp,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
+        }
+
+        // RIGHT: one combined indicator (bar behind, gray box on top)
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
@@ -391,35 +449,7 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
         ) {
             RightGIndicator(g = g, maxAbs = 0.5f) // tighter range so you can see movement easily
         }
-// COUNTDOWN HUD
-        val show = world.countdownShow
-        val sec  = world.countdownSeconds
-        val ring = world.countdownRingFrac
 
-        if (show && sec != null && ring != null) {
-            Box(Modifier.align(Alignment.Center)) {
-                // ring
-                Canvas(Modifier.size(180.dp)) {
-                    val stroke = 12.dp.toPx()
-                    val sweep  = 360f * ring
-                    drawArc(
-                        useCenter = false,
-                        startAngle = -90f,
-                        sweepAngle = sweep,
-                        style = Stroke(width = stroke),
-                        color = androidx.compose.ui.graphics.Color.Black,
-                        topLeft = Offset(stroke, stroke),
-                        size = Size(size.width - 2*stroke, size.height - 2*stroke)
-                    )
-                }
-                // big number
-                Text(
-                    text = sec.toString(),
-                    fontSize = 64.sp,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
-        }
 
 
         // BOTTOM: Current / Best / Lap counter
@@ -705,7 +735,7 @@ private fun updateCountdownState(
     val fix = latest.gps ?: return world.copy(
         countdownShow = false,
         countdownSeconds = null,
-        countdownRingFrac = null
+        //countdownRingFrac = null
     )
 
     // Need a promoted fastest brake point to count down to
@@ -714,7 +744,7 @@ private fun updateCountdownState(
         prevDistToFastestBP = null,
         countdownShow = false,
         countdownSeconds = null,
-        countdownRingFrac = null
+        //countdownRingFrac = null
     )
 
     // Compute ground speed from last two GPS fixes
@@ -739,7 +769,7 @@ private fun updateCountdownState(
         prevDistToFastestBP = distNow,
         countdownShow = out.show && approaching,
         countdownSeconds = if (out.show && approaching) out.secondsInt else null,
-        countdownRingFrac = if (out.show && approaching) out.ringFrac.coerceIn(0f, 1f) else null
+        //countdownRingFrac = if (out.show && approaching) out.ringFrac.coerceIn(0f, 1f) else null
     )
 }
 
@@ -1013,7 +1043,7 @@ private fun BrakePointDots(track: Track, world: WorldState) {
 private data class CountdownOut(
     val show: Boolean,
     val secondsInt: Int = 0,
-    val ringFrac: Float = 0f
+    // val ringFrac: Float = 0f
 )
 
 /** Convert time-to-brake (seconds) into UI state given a warn window. */
@@ -1025,7 +1055,7 @@ private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
     val frac = ((warnTimeS - tToBrake) / warnTimeS)
         .coerceIn(0.0, 1.0)
         .toFloat()
-    return CountdownOut(true, secs, frac)
+    return CountdownOut(true, secs)
 }
 
 /** Distance from current fix to the FASTEST brake point of the target corner. */
@@ -1048,7 +1078,7 @@ private fun WorldState.resetForTrack(track: Track) = copy(
     lastGpsFix = null,
     countdownShow = false,
     countdownSeconds = null,
-    countdownRingFrac = null,
+    //countdownRingFrac = null,
 
     // (optional) reset lap timing if you want laps to be per-track
     lapCount = 0,
