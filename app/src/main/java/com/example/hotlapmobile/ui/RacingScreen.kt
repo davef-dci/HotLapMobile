@@ -65,10 +65,19 @@ import android.os.SystemClock
 
 import android.util.Log
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 
 private const val APPROACH_EPS_M = 1.0  // meters of change needed to flip state
+
+private const val ARRIVE_BIAS_M = 3.0   // add ~3 m so zero appears a bit later
+
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
@@ -565,10 +574,26 @@ fun RacingScreen() {
 
 
             // Use the recorded fastest brake point for the current target corner (if any)
-            val tbp = world.value.fastestBrakePts[world.value.targetCornerIdx]
-            if (tbp != world.value.targetBrakePoint) {
-                world.value = world.value.copy(targetBrakePoint = tbp)
+// Only run countdown if a promoted fastest brake point exists
+            val fastestTbp = world.value.fastestBrakePts[world.value.targetCornerIdx]
+
+            if (fastestTbp == null) {
+                // No fastest brake point yet → clear countdown and TBP
+                world.value = world.value.copy(
+                    targetBrakePoint = null,
+                    countdownShow = false,
+                    countdownSeconds = null,
+                    countdownRingFrac = null
+                )
+            } else {
+                if (world.value.targetBrakePoint !== fastestTbp) {
+                    world.value = world.value.copy(targetBrakePoint = fastestTbp)
+                }
+                // countdown logic happens just below this block
             }
+
+
+
 
             // 3.x) Update approach/leave flag based on distance trend to TBP
             run {
@@ -604,24 +629,29 @@ fun RacingScreen() {
 
 
 // --- Show countdown only when APPROACHING the TBP ---
-            val tToBrake = extrapolatedTimeToBrake(world.value)
-            val approaching = (world.value.isApproachingTBP == true)
 
-            if (tToBrake != null && approaching) {
-                val out = countdownFrom(tToBrake, track.brakeWarnTimeS)
-                world.value = world.value.copy(
-                    countdownShow = out.show,
-                    countdownSeconds = if (out.show) out.secondsInt else null,
-                    countdownRingFrac = if (out.show) out.ringFrac.coerceIn(0f, 1f) else null
-                )
-            } else {
-                // hide when not approaching OR when we don’t have a valid estimate
-                world.value = world.value.copy(
-                    countdownShow = false,
-                    countdownSeconds = null,
-                    countdownRingFrac = null
-                )
+
+            if (fastestTbp != null) {   // only do countdown when fastest TBP exists
+                val tToBrake = extrapolatedTimeToBrake(world.value)
+                val approaching = (world.value.isApproachingTBP == true)
+
+                if (tToBrake != null && approaching) {
+                    val out = countdownFrom(tToBrake, track.brakeWarnTimeS)
+                    world.value = world.value.copy(
+                        countdownShow = out.show,
+                        countdownSeconds = if (out.show) out.secondsInt else null,
+                        countdownRingFrac = if (out.show) out.ringFrac.coerceIn(0f, 1f) else null
+                    )
+                } else {
+                    world.value = world.value.copy(
+                        countdownShow = false,
+                        countdownSeconds = null,
+                        countdownRingFrac = null
+                    )
+                }
             }
+
+
 
 
 
@@ -696,11 +726,38 @@ private fun RacingUi(world: WorldState, track: Track, g: Float) {
 
 
         if (world.countdownShow && world.countdownSeconds != null) {
-            Text(
-                text = "${world.countdownSeconds}",
-                fontSize = 80.sp,
-                modifier = Modifier.align(Alignment.Center)
-            )
+
+
+
+            val secs = world.countdownSeconds ?: 0
+
+
+            val countdownColor = when (secs) {
+                in 4..6 -> Color.Green
+                in 1..3 -> Color.Yellow
+                0 -> Color.Red
+                else -> Color.White
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(300.dp) // adjust size if needed
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    drawCircle(
+                        color = countdownColor,
+                        style = Stroke(width = 60f) // thickness of ring
+                    )
+                }
+
+                Text(
+                    text = secs.toString(),
+                    fontSize = 250.sp,
+                    color = countdownColor,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
         }
 
 
@@ -831,15 +888,15 @@ private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
 
     Box(
         modifier = modifier
-            .width(90.dp)            // wider
-            .height(40.dp)          // taller gray band
+            .width(120.dp)            // wider
+            .height(75.dp)          // taller gray band
             .background(Color(0xFFD9D9D9), RoundedCornerShape(10.dp))
             .padding(4.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            fontSize = 28.sp,
+            fontSize = 48.sp,
             color = Color.Black
         )
     }
@@ -1048,12 +1105,12 @@ private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
 private fun GArrowBar(
     g: Float,
     maxAbs: Float = 1.5f,
-    gain: Float = 2.0f,
+    gain: Float = 3.0f,
     modifier: Modifier = Modifier
 ) {
     Canvas(
         modifier = modifier
-            .width(90.dp)
+            .width(120.dp)
             .height(220.dp)
     ) {
         val w = size.width
@@ -1101,7 +1158,7 @@ private fun GArrowBar(
 private fun RightGIndicator(g: Float, maxAbs: Float = 1.5f) {
     Box(
         modifier = Modifier
-            .width(100.dp)
+            .width(120.dp)
             .height(220.dp)
     ) {
         // BACK: vertical bar
@@ -1315,7 +1372,10 @@ private fun extrapolatedTimeToBrake(world: WorldState): Double? {
 
     val nowMs = android.os.SystemClock.elapsedRealtime()
     val dt = (nowMs - tFix) / 1000.0
-    val dNow = (dFix - vFix * dt).coerceAtLeast(0.0)
+    // Use a slightly larger effective distance so zero lands closer to the actual TBP
+    val dFixBiased = dFix + ARRIVE_BIAS_M
+    val dNow = (dFixBiased - vFix * dt).coerceAtLeast(0.0)
+
     val t = dNow / vFix
     android.util.Log.d("BRAKE", "ok: dFix=${"%.2f".format(dFix)} dNow=${"%.2f".format(dNow)} vFix=${"%.2f".format(vFix)} t=${"%.2f".format(t)}")
     return t
@@ -1330,9 +1390,14 @@ private data class CountdownOut(
 private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
     if (tToBrake > warnTimeS) return CountdownOut(false, 0, 0f)
     if (tToBrake < 0.0) return CountdownOut(true, 0, 1f) // already at/inside BP
-    val secondsInt = kotlin.math.floor(tToBrake).toInt()
-    val fracWithinSecond = (tToBrake - secondsInt).toFloat() // 0.00..0.99
-    // Map “fraction of second remaining” → ring sweep (1.0 = full circle, 0.0 = just ticked)
-    val ringFrac = 1f - fracWithinSecond
+
+    // Use CEIL so 5.01..6.00s shows "6"
+    val secondsInt = kotlin.math.ceil(tToBrake).toInt()
+
+    // Progress within the *shown* second: 0..1 (0 = just ticked to this second)
+    val ringFrac = (1.0 - (secondsInt - tToBrake))
+        .coerceIn(0.0, 1.0)
+        .toFloat()
+
     return CountdownOut(true, secondsInt, ringFrac)
 }
