@@ -451,12 +451,13 @@ fun RacingScreen() {
                 currentLatLon = fix?.let { LatLon(it.lat, it.lon) },
                 isBrakingNow = (phaseNow == DrivePhase.BRAKING)
             )
+            // 4) Update countdown (needs fastestBrakePts, GPS history, and corner targeting)
+            world.value = updateCountdownState(latest.value, world.value, track)
 
-            // 4) Try capturing a candidate brake point (tidy one-liner)
+            // 5) Try capturing a candidate brake point (tidy one-liner)
             world.value = updateBrakePointState(world.value, track)
 
-            // 5) Update countdown (needs fastestBrakePts, GPS history, and corner targeting)
-            world.value = updateCountdownState(latest.value, world.value, track)
+
 
             // 5) Any other per-tick bookkeeping you keep (optional)
             // phase = phaseNow   // if you show it elsewhere
