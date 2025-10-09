@@ -65,6 +65,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 
+import kotlin.math.floor
+import kotlin.math.max
+
+import android.os.SystemClock
 
 
 
@@ -100,6 +104,8 @@ private fun computeLateralG(
     val proj = dot(linearAcc, lateral)                      // project accel onto lateral axis
     return proj / 9.80665f                                  // convert m/s^2 → g's
 }
+
+private const val COUNTDOWN_HOLD_MS: Long = 2000L
 
 
 // STEP: Always-on circular ring composable (outline-only, fixed pixel conversion)
@@ -317,7 +323,12 @@ data class WorldState(
 
 // helpers to compute t->brake
     val lastGpsFix: GpsFix? = null,           // for speed calc
-    val prevDistToFastestBP: Double? = null   // to check we’re actually approaching
+    val prevDistToFastestBP: Double? = null,   // to check we’re actually approaching
+
+    //allow 0 to be displayed past brake point
+
+    val countdownHoldUntilMs: Long? = null
+
 )
 
 
@@ -855,6 +866,19 @@ private fun updateCountdownState(
     world: WorldState,
     track: Track
 ): WorldState {
+    // --- HOLD: if we're within the hold window, force "0" visible and skip the rest ---
+    val nowMs = SystemClock.elapsedRealtime()
+    world.countdownHoldUntilMs?.let { holdUntil ->
+        if (nowMs < holdUntil) {
+            return world.copy(
+                countdownShow = true,
+                countdownSeconds = 0
+            )
+        }
+    }
+
+
+
 // Inside your countdown updater function, returning a new World
     val fix = latest.gps
     if (fix == null) {
@@ -896,14 +920,23 @@ private fun updateCountdownState(
         ?: Double.POSITIVE_INFINITY
     val out = countdownFrom(tToBrake, COUNTDOWN_WARN_TIME_S)
 
+
+
     val newShow = out.show && approaching
     val newSec  = if (newShow) out.secondsInt else null
+
+    // If we just transitioned to 0, start the hold window
+    val prevSec = world.countdownSeconds
+    val startHoldNow = (newShow && newSec == 0 && prevSec != 0)
+    val holdUntil = if (startHoldNow) nowMs + COUNTDOWN_HOLD_MS else world.countdownHoldUntilMs
+
 
     return world.copy(
         lastGpsFix = fix,
         prevDistToFastestBP = distNow,
         countdownShow = newShow,
         countdownSeconds = newSec,
+        countdownHoldUntilMs = holdUntil
     )
 
 }
@@ -1236,13 +1269,11 @@ private data class CountdownOut(
 /** Convert time-to-brake (seconds) into UI state given a warn window. */
 private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
     if (tToBrake.isNaN() || tToBrake.isInfinite()) return CountdownOut(false)
-    if (tToBrake <= 0.0 || tToBrake > warnTimeS)   return CountdownOut(false)
+    // allow small negative (crossed exactly now); hide if too far past or too early
+    if (tToBrake < -0.25 || tToBrake > warnTimeS) return CountdownOut(false)
+    val sec = max(0.0, floor(tToBrake)).toInt()   // clamp to 0 (so we can show “0”)
 
-    val secs = kotlin.math.ceil(tToBrake).toInt()          // 2.7s -> "3"
-    val frac = ((warnTimeS - tToBrake) / warnTimeS)
-        .coerceIn(0.0, 1.0)
-        .toFloat()
-    return CountdownOut(true, secs)
+    return CountdownOut(true, sec)
 }
 
 /** Distance from current fix to the FASTEST brake point of the target corner. */
