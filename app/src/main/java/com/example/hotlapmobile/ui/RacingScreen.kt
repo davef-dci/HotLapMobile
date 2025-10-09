@@ -332,10 +332,15 @@ private const val TAU_MS = 300f
 // Deadband around zero after smoothing to keep “coast” steady
 private const val DEAD_BAND_G = 0.02f
 
+private const val COUNTDOWN_WARN_TIME_S = 6.0
+
 
 private fun dot3(a: FloatArray, x: Float, y: Float, z: Float): Float {
     return a[0] * x + a[1] * y + a[2] * z
 }
+
+
+
 
 @Composable
 fun rememberWorldState(): MutableState<WorldState> =
@@ -489,8 +494,20 @@ fun RacingScreen() {
  * Purpose:
  * - Placeholder only; we'll build the countdown UI later.
  */
+
+private fun countdownColor(sec: Int?): Color {
+    return when (sec) {
+        6, 5, 4 -> Color(0xFF00C853) // green
+        3, 2, 1 -> Color(0xFFFFEB3B) // yellow
+        0       -> Color(0xFFFF1744) // red
+        else    -> Color.Gray         // inactive/default
+    }
+}
 @Composable
 private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = null) {
+
+
+
     Box(modifier = Modifier.fillMaxSize()) {
 
         // TOP: Track name
@@ -522,16 +539,18 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
         Box(Modifier.align(Alignment.Center)) {
             val show = world.countdownShow
             val sec  = world.countdownSeconds
+            val color = countdownColor(sec)
             var lateralG by remember { mutableStateOf(0.4f) }  // start with a visible fake value
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 // STEP 6b: ring + text layered together
                 Box(contentAlignment = Alignment.Center) {
-                    CountdownRing(size = 400.dp, strokeDp = 36.dp, color = Color.Gray)
+                    CountdownRing(size = 400.dp, strokeDp = 36.dp, color = color)
                     if (show && sec != null) {
                     //if (true) {
                         Text(
                             text = sec.toString(),
+                            color = color,
                             //text = 5.toString(),
                             fontWeight = FontWeight.Bold,
                             fontSize = 350.sp
@@ -829,53 +848,64 @@ private fun updateCornerState(
     )
 }
 
-// Tunables for the countdown window
-private const val COUNTDOWN_WARN_TIME_S = 5.0    // show countdown within last 5 seconds
+
 
 private fun updateCountdownState(
     latest: LatestInputs,
     world: WorldState,
     track: Track
 ): WorldState {
-    val fix = latest.gps ?: return world.copy(
-        countdownShow = false,
-        countdownSeconds = null,
-        //countdownRingFrac = null
-    )
-
-    // Need a promoted fastest brake point to count down to
-    val distNow = distToTargetFastestBrakePoint(world) ?: return world.copy(
-        lastGpsFix = fix,
-        prevDistToFastestBP = null,
-        countdownShow = false,
-        countdownSeconds = null,
-        //countdownRingFrac = null
-    )
-
-    // Compute ground speed from last two GPS fixes
-    val last = world.lastGpsFix
-    val speedMps: Double? = last?.let {
-        val dt = (fix.tMillis - it.tMillis).coerceAtLeast(1L) / 1000.0
-        val d  = haversineMeters(it.lat, it.lon, fix.lat, fix.lon)
-        if (dt > 0.0) d / dt else null
+// Inside your countdown updater function, returning a new World
+    val fix = latest.gps
+    if (fix == null) {
+        // No GPS this tick → hide countdown but keep other state
+        return world.copy(
+            countdownShow = false,
+            countdownSeconds = null
+        )
     }
 
-    // Are we approaching the brake point? (distance decreasing)
-    val approaching = world.prevDistToFastestBP?.let { prev -> distNow < prev } ?: false
+// If there isn't a *new* GPS fix, keep what we're showing
+    world.lastGpsFix?.let { last ->
+        if (fix.tMillis == last.tMillis) {
+            return world // preserve countdownShow / countdownSeconds unchanged
+        }
+    }
 
-    // Time to brake = distance / speed
+// ---- from here on we know we have a NEW fix ----
+
+// (example) compute distance to target brake point
+    val distNow = distToTargetFastestBrakePoint(world) ?: return world.copy(
+        lastGpsFix = fix,
+        countdownShow = false,
+        countdownSeconds = null
+    )
+
+// (example) compute speed from last fix, if you keep that around
+    val last = world.lastGpsFix
+    val dtSec = if (last != null) ((fix.tMillis - last.tMillis).coerceAtLeast(1)) / 1000.0 else null
+    val dMeters = if (last != null) haversineMeters(last.lat, last.lon, fix.lat, fix.lon) else null
+    val speedMps = if (dtSec != null && dtSec > 0 && dMeters != null) dMeters / dtSec else null
+
+// approaching with a small epsilon to avoid toggle on jitter
+    val epsilonM = 0.5
+    val approaching = world.prevDistToFastestBP?.let { prev -> distNow <= prev + epsilonM } ?: false
+
+// time-to-brake → countdown decision
     val tToBrake = speedMps?.let { if (it > 0.1) distNow / it else Double.POSITIVE_INFINITY }
         ?: Double.POSITIVE_INFINITY
-
     val out = countdownFrom(tToBrake, COUNTDOWN_WARN_TIME_S)
+
+    val newShow = out.show && approaching
+    val newSec  = if (newShow) out.secondsInt else null
 
     return world.copy(
         lastGpsFix = fix,
         prevDistToFastestBP = distNow,
-        countdownShow = out.show && approaching,
-        countdownSeconds = if (out.show && approaching) out.secondsInt else null,
-        //countdownRingFrac = if (out.show && approaching) out.ringFrac.coerceIn(0f, 1f) else null
+        countdownShow = newShow,
+        countdownSeconds = newSec,
     )
+
 }
 
 
