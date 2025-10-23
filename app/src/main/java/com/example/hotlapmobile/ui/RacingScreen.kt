@@ -452,6 +452,17 @@ fun RacingScreen() {
     // Start GPS producer
     GpsProducer(latest)
 
+    // Start USB producer (replace your old System GPS producer while testing)
+    // GpsUsbProducer(latest)
+
+// Show a tiny status readout somewhere
+    UsbPuckDebugPanel(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp)
+    )
+
+
     LaunchedEffect(Unit) {
         while (true) {
             // 1) Start/Finish + corner
