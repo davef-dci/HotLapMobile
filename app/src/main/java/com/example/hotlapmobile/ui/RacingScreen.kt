@@ -368,7 +368,8 @@ fun rememberWorldState(): MutableState<WorldState> =
  * - Uses a relatively fast request interval (200 ms). The 10 Hz loop will decide what to do.
  * - Uses SystemClock.elapsedRealtime() for a monotonic timestamp (safe for age calculations).
  */
-@android.annotation.SuppressLint("MissingPermission")
+/*
+@android.annotation.SuppressLint("MissingPermission") //supress lint warnings for location permission
 @Composable
 private fun GpsProducer(latest: MutableState<LatestInputs>) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -400,7 +401,7 @@ private fun GpsProducer(latest: MutableState<LatestInputs>) {
     }
 }
 
-
+*/
 
 @Composable
 fun rememberLatestInputsMailbox(): MutableState<LatestInputs> {
@@ -415,11 +416,10 @@ fun RacingScreen() {
     // 10 Hz heartbeat counter
     var ticks by remember { mutableStateOf(0L) }
 
-    // Mailbox for latest sensor inputs
-    val latest = rememberLatestInputsMailbox()
-    val world = rememberWorldState()
+
     // --- Track selection from DataStore ---
     val context = LocalContext.current
+    val usbSource = remember { com.example.hotlapmobile.util.UsbPuckGpsSource(context) }  // 👇 NEW: single shared USB GPS source for the whole screen
     val trackRepo = remember(context) { TrackRepo(context) }
     val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
     if (selectedTrack == null) {
@@ -429,9 +429,25 @@ fun RacingScreen() {
         }
         return
     }
+
+
+    // start/stop USB once for the whole screen
+    DisposableEffect(Unit) {
+        usbSource.start()
+        onDispose { usbSource.stop() }
+    }
+    // Mailbox for latest sensor inputs
+    val latest = rememberLatestInputsMailbox()
+    val world = rememberWorldState()
+
+    // ⬇⬇ THIS IS CRITICAL ⬇⬇
+    GpsUsbProducer(
+        latest = latest,
+        source = usbSource
+    )
+
+
     val track = selectedTrack
-
-
     LaunchedEffect(track.name) {
         world.value = world.value.resetForTrack(track)
     }
@@ -450,16 +466,15 @@ fun RacingScreen() {
     AccelProducer(latest)
 
     // Start GPS producer
-    GpsProducer(latest)
+    //GpsProducer(latest)
 
-    // Start USB producer (replace your old System GPS producer while testing)
-    // GpsUsbProducer(latest)
 
 // Show a tiny status readout somewhere
     UsbPuckDebugPanel(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(8.dp)
+            .padding(8.dp),
+        source = usbSource
     )
 
 
