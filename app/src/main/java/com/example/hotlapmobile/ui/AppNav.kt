@@ -25,6 +25,7 @@ fun AppNav() {
                 nav.navigate(Routes.Menu) { popUpTo(Routes.Splash) { inclusive = true } }
             })
         }
+
         composable(Routes.Menu) {
             MainMenu(
                 onCalibrate = { nav.navigate(Routes.Calibrate) },
@@ -33,17 +34,27 @@ fun AppNav() {
                 onRace = { nav.navigate(Routes.Race) }
             )
         }
+
         composable(Routes.Calibrate) {
             CalibrateScreen(onBack = { nav.popBackStack() })
         }
-        composable(Routes.Settings)    { SettingsScreen() }
+
+        composable(Routes.Settings) {
+            SettingsScreen(
+                onBack = { nav.popBackStack() }
+            )
+        }
+
         composable(Routes.Race) {
             EnsureLocationPermission {
                 RacingScreen()
             }
         }
+
         composable(Routes.SelectTrack) {
-            SelectTrackScreen(onBack = { nav.popBackStack()}) }
+            SelectTrackScreen(
+                onBack = { nav.popBackStack() }
+            )
+        }
     }
 }
-

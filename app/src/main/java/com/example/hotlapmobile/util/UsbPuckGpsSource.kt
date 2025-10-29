@@ -150,7 +150,7 @@ class UsbPuckGpsSource(
     }
 
     private fun handleLine(line: String) {
-        // We only need RMC for lat/lon (you can add GGA later for HDOP/sats)
+        // We only need RMC for lat/lon (you can add GGA later for HDOP/sats) -
         // Accept any talker: $GPRMC / $GNRMC / $GARMC etc.
         if (!line.startsWith("$") || !line.contains("RMC,")) return
         if (!checksumOk(line)) return

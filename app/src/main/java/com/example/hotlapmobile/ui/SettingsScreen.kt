@@ -1,0 +1,144 @@
+package com.example.hotlapmobile.ui
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.hotlapmobile.data.SettingsRepo
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.getValue
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Repo that reads & writes the global settings
+    val settingsRepo = remember(context) { SettingsRepo(context) }
+
+    // Observe current saved values (or defaults if first run)
+    val globalSettings by settingsRepo.settings
+        .collectAsStateWithLifecycle(
+            initialValue = com.example.hotlapmobile.config.GlobalSettingsDefaults.default
+        )
+
+    // Local text fields (as strings) so the user can edit
+    var cornerTolText by remember { mutableStateOf(globalSettings.cornerToleranceM.toString()) }
+    var brakeZoneText by remember { mutableStateOf(globalSettings.brakeZoneDistanceM.toString()) }
+    var brakeWarnText by remember { mutableStateOf(globalSettings.brakeWarnDistanceM.toString()) }
+
+    // simple parse helpers
+    fun toDoubleOr(old: Double, txt: String): Double {
+        return txt.toDoubleOrNull() ?: old
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .padding(pad)
+                .fillMaxSize()
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+
+            Text(
+                "Global Track Tuning",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            // Corner tolerance (meters)
+            OutlinedTextField(
+                value = cornerTolText,
+                onValueChange = { cornerTolText = it },
+                label = { Text("Corner tolerance (m)") },
+                supportingText = { Text("How close GPS must be to 'count' as being at a corner") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Brake zone distance (meters)
+            OutlinedTextField(
+                value = brakeZoneText,
+                onValueChange = { brakeZoneText = it },
+                label = { Text("Brake zone distance (m)") },
+                supportingText = { Text("Start capturing a brake point when within this distance of the next corner") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // Brake warn distance (meters)
+            OutlinedTextField(
+                value = brakeWarnText,
+                onValueChange = { brakeWarnText = it },
+                label = { Text("Brake warn distance (m)") },
+                supportingText = { Text("How far out to start the on-screen brake marker/countdown") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Button(
+                onClick = {
+                    // When the user taps Save:
+                    val newCornerTol   = toDoubleOr(globalSettings.cornerToleranceM, cornerTolText)
+                    val newBrakeZone   = toDoubleOr(globalSettings.brakeZoneDistanceM, brakeZoneText)
+                    val newBrakeWarn   = toDoubleOr(globalSettings.brakeWarnDistanceM, brakeWarnText)
+
+                    scope.launch {
+                        settingsRepo.updateAll(
+                            com.example.hotlapmobile.config.GlobalSettings(
+                                cornerToleranceM   = newCornerTol,
+                                brakeZoneDistanceM = newBrakeZone,
+                                brakeWarnDistanceM = newBrakeWarn
+                            )
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Save")
+            }
+
+            // Show what's currently active (after save this will change because Flow updates)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Active values", style = MaterialTheme.typography.titleSmall)
+                    Text("Corner tolerance: ${"%.1f".format(globalSettings.cornerToleranceM)} m")
+                    Text("Brake zone distance: ${"%.1f".format(globalSettings.brakeZoneDistanceM)} m")
+                    Text("Brake warn distance: ${"%.1f".format(globalSettings.brakeWarnDistanceM)} m")
+                }
+            }
+        }
+    }
+}

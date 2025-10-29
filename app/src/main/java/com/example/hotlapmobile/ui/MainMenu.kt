@@ -97,7 +97,7 @@ fun MainMenu(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Hot Lap Mobile - V1.4i",
+            text = "Hot Lap Mobile - V1.5a",
             style = MaterialTheme.typography.headlineLarge,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
@@ -125,7 +125,7 @@ fun MainMenu(
 
         Spacer(Modifier.height(16.dp))
 
-        BigOutlinedButton("Settings", onSettings)
+        BigButton("Settings", onSettings)
 
         Spacer(Modifier.height(16.dp))
 

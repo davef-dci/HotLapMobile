@@ -2,15 +2,30 @@ package com.example.hotlapmobile.config
 
 data class LatLon(val lat: Double, val lon: Double)
 
+data class GlobalSettings(
+    val cornerToleranceM: Double,
+    val brakeZoneDistanceM: Double,
+    val brakeWarnDistanceM: Double
+)
+
+// these are our current built-in defaults
+object GlobalSettingsDefaults {
+    val default = GlobalSettings(
+        cornerToleranceM = 20.0,
+        brakeZoneDistanceM = 150.0,
+        brakeWarnDistanceM = 120.0
+    )
+}
+
+
+
+
 data class Track(
     val name: String,
     val startFinish: LatLon,
     val startFinishRadiusM: Double = 20.0,
-    val corners: List<LatLon>,
-    // track-wide parameters
-    val cornerToleranceM: Double = 20.0,
-    val brakeZoneDistanceM: Double = 150.0,
-    val brakeWarnDistanceM: Double = 120.0
+    val corners: List<LatLon>
+
 )
 
 object Tracks {
@@ -22,10 +37,7 @@ object Tracks {
             LatLon(43.046943, -89.447696), // C1
             LatLon(43.042693, -89.448071), // C2
             LatLon(43.044651, -89.444843)  // C3
-        ),
-        cornerToleranceM = 20.0,
-        brakeZoneDistanceM = 150.0,
-        brakeWarnDistanceM = 120.0
+        )
     )
 
     // NEW: Kent Kallsen Demo Track
@@ -38,10 +50,7 @@ object Tracks {
             LatLon(42.911770, -89.151501),   // C2
             LatLon(42.897544, -89.151200),   // C3
             LatLon(42.897930, -89.131966)    // C4
-        ),
-        cornerToleranceM = 25.0,             // tweak per feel; 20–30m is typical
-        brakeZoneDistanceM = 150.0,          // begin looking for braking
-        brakeWarnDistanceM = 120.0           // start 6→!Brake! countdown
+        )
     )
 
     val all = listOf(
