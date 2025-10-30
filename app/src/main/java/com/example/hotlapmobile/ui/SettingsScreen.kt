@@ -14,6 +14,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.data.SettingsRepo
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveable
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -33,9 +34,18 @@ fun SettingsScreen(
         )
 
     // Local text fields (as strings) so the user can edit
-    var cornerTolText by remember { mutableStateOf(globalSettings.cornerToleranceM.toString()) }
-    var brakeZoneText by remember { mutableStateOf(globalSettings.brakeZoneDistanceM.toString()) }
-    var brakeWarnText by remember { mutableStateOf(globalSettings.brakeWarnDistanceM.toString()) }
+    var cornerTolText  by rememberSaveable { mutableStateOf("") }
+    var brakeZoneText  by rememberSaveable { mutableStateOf("") }
+    var brakeWarnText  by rememberSaveable { mutableStateOf("") }
+
+// Whenever globalSettings changes (on save or when screen re-enters),
+// update the text fields to reflect the latest active values.
+    LaunchedEffect(globalSettings) {
+        cornerTolText = globalSettings.cornerToleranceM.toString()
+        brakeZoneText = globalSettings.brakeZoneDistanceM.toString()
+        brakeWarnText = globalSettings.brakeWarnDistanceM.toString()
+    }
+
 
     // simple parse helpers
     fun toDoubleOr(old: Double, txt: String): Double {
@@ -76,7 +86,7 @@ fun SettingsScreen(
                 onValueChange = { cornerTolText = it },
                 label = { Text("Corner tolerance (m)") },
                 supportingText = { Text("How close GPS must be to 'count' as being at a corner") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -86,7 +96,7 @@ fun SettingsScreen(
                 onValueChange = { brakeZoneText = it },
                 label = { Text("Brake zone distance (m)") },
                 supportingText = { Text("Start capturing a brake point when within this distance of the next corner") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -96,7 +106,7 @@ fun SettingsScreen(
                 onValueChange = { brakeWarnText = it },
                 label = { Text("Brake warn distance (m)") },
                 supportingText = { Text("How far out to start the on-screen brake marker/countdown") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 

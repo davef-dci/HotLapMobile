@@ -78,27 +78,25 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.data.SettingsRepo
 
 
-
-
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
 
 
 // STEP 8: Dot product of two 3D vectors (utility for projections)
 private fun dot(a: FloatArray, b: FloatArray): Float =
-    a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 // STEP 8: Cross product of two 3D vectors (utility to compute lateral axis)
 private fun cross(a: FloatArray, b: FloatArray): FloatArray =
     floatArrayOf(
-        a[1]*b[2] - a[2]*b[1],
-        a[2]*b[0] - a[0]*b[2],
-        a[0]*b[1] - a[1]*b[0]
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0]
     )
 
 // STEP 8: Normalize a 3D vector (utility to get unit vectors)
 private fun normalize(v: FloatArray): FloatArray {
-    val m = kotlin.math.sqrt((v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).toDouble()).toFloat()
-    return if (m == 0f) floatArrayOf(0f, 0f, 0f) else floatArrayOf(v[0]/m, v[1]/m, v[2]/m)
+    val m = kotlin.math.sqrt((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).toDouble()).toFloat()
+    return if (m == 0f) floatArrayOf(0f, 0f, 0f) else floatArrayOf(v[0] / m, v[1] / m, v[2] / m)
 }
 
 // STEP 8: Compute lateral g from linear acceleration, forward unit, and gravity
@@ -142,7 +140,6 @@ private fun CountdownRing(
 }
 
 
-
 //stream the accelerometer sensor and fill longG based on +X axis
 @Composable
 private fun AccelProducer(latest: MutableState<LatestInputs>) {
@@ -166,8 +163,8 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 // Build a normalized forward vector from saved state; default to +X if missing/zero
     val (fx, fy, fz) = run {
         val v = calibState.vec ?: floatArrayOf(1f, 0f, 0f)
-        val n = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).let { if (it == 0f) 1f else it }
-        Triple(v[0]/n, v[1]/n, v[2]/n)
+        val n = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).let { if (it == 0f) 1f else it }
+        Triple(v[0] / n, v[1] / n, v[2] / n)
     }
 
 
@@ -189,10 +186,9 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
                 gravityVec[1] = e.values[1]
                 gravityVec[2] = e.values[2]
             }
+
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
-
-
 
 
         val listener = object : SensorEventListener {
@@ -230,13 +226,12 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
                 latest.value = latest.value.copy(longG = gSmooth)
 
 
-
                 // STEP 10d: Compute lateral g from current vectors (not publishing yet)
 // STEP 14b: compute + EMA smooth + deadband for lateral g
                 val lat = computeLateralG(
-                    linearAcc   = floatArrayOf(ax, ay, az),
+                    linearAcc = floatArrayOf(ax, ay, az),
                     forwardUnit = floatArrayOf(fx, fy, fz),
-                    gravity     = gravityVec
+                    gravity = gravityVec
                 )
 
 // clamp spikes like longitudinal
@@ -244,7 +239,7 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 
 // EMA using the same alpha as longitudinal
                 val emaPrevLat = emaLatG ?: latRaw
-                val emaNowLat  = emaPrevLat + alpha * (latRaw - emaPrevLat)
+                val emaNowLat = emaPrevLat + alpha * (latRaw - emaPrevLat)
                 emaLatG = emaNowLat
 
 // deadband around zero for stability
@@ -252,7 +247,6 @@ private fun AccelProducer(latest: MutableState<LatestInputs>) {
 
 // publish smoothed lateral g
                 latest.value = latest.value.copy(latG = latSmooth)
-
 
 
 // (next step we'll store this in LatestInputs and show it in the UI)
@@ -287,12 +281,12 @@ data class GpsFix(
     val tMillis: Long  // from android.os.SystemClock.elapsedRealtime()
 )
 
- //LatestInputs holds the most recent sensor readings we care about.
+//LatestInputs holds the most recent sensor readings we care about.
 data class LatestInputs(
     val gps: GpsFix? = null,
     val longG: Float? = null,      // longitudinal accel in g, projected on calibrated forward
-    val latG:  Float? = null,
- )
+    val latG: Float? = null,
+)
 
 //Prepare fields we'll need for S/F detection and lap counting.
 data class WorldState(
@@ -329,7 +323,6 @@ data class WorldState(
     val countdownSeconds: Int? = null,        // integer seconds to display (3, 2, 1)
 
 
-
     // val countdownRingFrac: Float? = null,     // 0..1 for ring progress
 
 // helpers to compute t->brake
@@ -340,8 +333,11 @@ data class WorldState(
 
     val countdownHoldUntilMs: Long? = null,
 
-    val trackMarker: Int? = null,          // 4..1 when approaching brake point, null when off
-    val approachingBrakePt: Boolean = false
+    val trackMarker: Int? = null,          // 6..1 when approaching brake point, null when off
+    val approachingBrakePt: Boolean = false,
+    val zeroHoldCornerIdx: Int? = null,  // NEW: latch “0” until we rotate to the next corner
+    val prevApproaching: Boolean? = null,        // last tick’s approaching flag
+    val leavingStreak: Int = 0                  // debounce: consecutive “leaving” samples
 
 )
 
@@ -349,11 +345,14 @@ data class WorldState(
 //helpers to convert sensor readings to g's and project acceleration onto calibrated forward axis.
 
 private const val ONE_G = 9.80665f   // conversion from m/s² → g
+
 // --- Longitudinal g smoothing (EMA) ---
 // Max believable g before smoothing (guards against IMU spikes)
 private const val G_CLAMP = 1.8f
+
 // Low-pass time constant in milliseconds (lower = snappier, higher = smoother)
 private const val TAU_MS = 300f
+
 // Deadband around zero after smoothing to keep “coast” steady
 private const val DEAD_BAND_G = 0.02f
 
@@ -363,8 +362,6 @@ private const val COUNTDOWN_WARN_TIME_S = 6.0
 private fun dot3(a: FloatArray, x: Float, y: Float, z: Float): Float {
     return a[0] * x + a[1] * y + a[2] * z
 }
-
-
 
 
 @Composable
@@ -433,7 +430,8 @@ fun RacingScreen() {
 
     // --- Track selection from DataStore ---
     val context = LocalContext.current
-    val usbSource = remember { com.example.hotlapmobile.util.UsbPuckGpsSource(context) }  // 👇 NEW: single shared USB GPS source for the whole screen
+    val usbSource =
+        remember { com.example.hotlapmobile.util.UsbPuckGpsSource(context) }  // 👇 NEW: single shared USB GPS source for the whole screen
     val trackRepo = remember(context) { TrackRepo(context) }
     val selectedTrack = trackRepo.current.collectAsStateWithLifecycle(initialValue = null).value
 
@@ -478,7 +476,6 @@ fun RacingScreen() {
     }
 
 
-
     //context for braking and accelerating
     val prefsRepo = remember(context) { PrefsRepo(context) }
     val brakeThreshG = prefsRepo.brakeThreshG
@@ -518,6 +515,9 @@ fun RacingScreen() {
                 currentLatLon = fix?.let { LatLon(it.lat, it.lon) },
                 isBrakingNow = (phaseNow == DrivePhase.BRAKING)
             )
+
+
+
             // 4) Update countdown (needs fastestBrakePts, GPS history, and corner targeting)
             // world.value = updateCountdownState(latest.value, world.value, track)
 
@@ -527,10 +527,11 @@ fun RacingScreen() {
                 track = track,
                 brakeZoneDistanceM = brakeZoneDistanceM
             )
-
+            // normalize approach state first
+            world.value = updateApproachState(world.value)
 
             // 6) Update the Lua-style distance bucket marker
-            world.value = updateTrackMarkerState(world.value)
+            world.value = updateTrackMarkerState(world.value, brakeWarnDistanceM, cornerToleranceM)
 
 
             // 5) Any other per-tick bookkeeping you keep (optional)
@@ -549,8 +550,21 @@ fun RacingScreen() {
         modifier = Modifier.fillMaxSize()
     ) { page ->
         when (page) {
-            0 -> RacingUi(world = world.value, track = track, g = latest.value.longG ?: 0f, latG = latest.value.latG)
-            1 -> DebugUi(ticks = ticks, latest = latest.value, world = world.value, track = track, phase = phase, brakeThreshG = brakeThreshG)
+            0 -> RacingUi(
+                world = world.value,
+                track = track,
+                g = latest.value.longG ?: 0f,
+                latG = latest.value.latG
+            )
+
+            1 -> DebugUi(
+                ticks = ticks,
+                latest = latest.value,
+                world = world.value,
+                track = track,
+                phase = phase,
+                brakeThreshG = brakeThreshG
+            )
         }
     }
 
@@ -565,10 +579,11 @@ private fun countdownColor(sec: Int?): Color {
     return when (sec) {
         6, 5, 4 -> Color(0xFF00C853) // green
         3, 2, 1 -> Color(0xFFFFEB3B) // yellow
-        0       -> Color(0xFFFF1744) // red
-        else    -> Color.Gray         // inactive/default
+        0 -> Color(0xFFFF1744) // red
+        else -> Color.Gray         // inactive/default
     }
 }
+
 @Composable
 private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = null) {
 
@@ -593,15 +608,9 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
         }
 
 
-// COUNTDOWN HUD
-        val show = world.countdownShow
-        val sec  = world.countdownSeconds
-
-
-// Center: ring with countdown text on top + lateral bar below
         Box(Modifier.align(Alignment.Center)) {
             // our new distance-based marker info
-            val marker = world.trackMarker           // Int? (4..1) or null
+            val marker = world.trackMarker           // Int? (6..1) or null
             val approaching = world.approachingBrakePt
             val color = markerColor(marker)
 
@@ -638,8 +647,6 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
         }
 
 
-
-
         // BOTTOM: Current / Best / Lap counter
         Column(
             modifier = Modifier
@@ -648,14 +655,13 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
             verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(text = "Target Corner: ${world.targetCornerIdx+1}", fontSize = 32.sp)
+            Text(text = "Target Corner: ${world.targetCornerIdx + 1}", fontSize = 32.sp)
             Text(text = "Current Lap: ${formatMs(world.currentLapElapsedMs)}", fontSize = 32.sp)
             Text(text = "Best: ${formatMs(world.bestLapMs)}", fontSize = 28.sp)
             Text(text = "Lap: ${world.lapCount}", fontSize = 22.sp)
         }
     }
 }
-
 
 
 /*
@@ -691,9 +697,6 @@ private fun DebugUi(
         androidx.compose.material3.Text("GPS age ms: ${ageMs ?: "n/a"}")
 
 
-
-
-
         // start/finish info
         val dStr = world.distToStartM?.let { String.format("%.1f m", it) } ?: "n/a"
         androidx.compose.material3.Text("Start/Finish dist: $dStr")
@@ -719,11 +722,13 @@ private fun DebugUi(
 
 
 
-        Text("Fastest brake pt for target? " +
-                if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no")
+        Text(
+            "Fastest brake pt for target? " +
+                    if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no"
+        )
         Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
 
-        Text("Target corner: ${world.targetCornerIdx+1}")
+        Text("Target corner: ${world.targetCornerIdx + 1}")
         Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
         Text("At corner: ${world.atCorner}")
 
@@ -755,8 +760,6 @@ private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
         )
     }
 }
-
-
 
 
 //function that determines the distance from start/finish and whether we are in the start finish zone
@@ -848,7 +851,7 @@ private fun formatMs(ms: Long?): String {
     if (ms == null) return "--:--.---"
     val minutes = ms / 60_000
     val seconds = (ms % 60_000) / 1_000
-    val millis  = ms % 1_000
+    val millis = ms % 1_000
     return String.format("%d:%02d.%03d", minutes, seconds, millis)
 }
 
@@ -880,7 +883,10 @@ private const val COOLDOWN_MS = 2000L  // 2s is conservative; tune after testing
 /*
  * True iff this tick is a rising edge AND the cooldown has elapsed.
  */
-private fun isEnteringAllowed(world: WorldState, now: Long = android.os.SystemClock.elapsedRealtime()): Boolean {
+private fun isEnteringAllowed(
+    world: WorldState,
+    now: Long = android.os.SystemClock.elapsedRealtime()
+): Boolean {
     val entering = world.inStartZone && !world.wasInStartZone
     if (!entering) return false
     val last = world.lastSfEnterMs ?: return true
@@ -971,9 +977,8 @@ private fun updateCountdownState(
     val out = countdownFrom(tToBrake, COUNTDOWN_WARN_TIME_S)
 
 
-
     val newShow = out.show && approaching
-    val newSec  = if (newShow) out.secondsInt else null
+    val newSec = if (newShow) out.secondsInt else null
 
     // If we just transitioned to 0, start the hold window
     val prevSec = world.countdownSeconds
@@ -987,14 +992,15 @@ private fun updateCountdownState(
         countdownSeconds = newSec,
         countdownHoldUntilMs = holdUntil
     )
-
 }
 
 // Distance-based brake marker, modeled after the Lua "track_marker" logic.
 // This ignores time/speed and just asks: how deep are we inside a fixed
 // warning distance in front of the fastest brake point for the target corner?
 private fun updateTrackMarkerState(
-    world: WorldState
+    world: WorldState,
+    brakeWarnM: Double,
+    cornerToleranceM: Double
 ): WorldState {
     // 1. How far are we from the fastest brake point for the current target corner?
     val distNowM = distToTargetFastestBrakePoint(world)
@@ -1003,33 +1009,35 @@ private fun updateTrackMarkerState(
             // keep whatever the last approach state was
             approachingBrakePt = world.approachingBrakePt
         )
+// If we’re latched for the current target corner, keep showing 0.
+    if (world.zeroHoldCornerIdx == world.targetCornerIdx) {
+        return world.copy(trackMarker = 0)
+    }
 
-    // IMPORTANT:
-    // We DO NOT recompute "approaching" here.
-    // We trust prevDistToFastestBP was already updated in updateCountdownState(),
-    // and we trust that function's logic about whether we're actually closing.
-    val approaching = world.prevDistToFastestBP?.let { prev ->
-        // are we still getting closer? (same epsilon logic)
-        val epsilonM = 0.5
-        distNowM <= prev + epsilonM
-    } ?: false
+    val warnDistanceM = brakeWarnM
 
-    // 2. Define the warning window.
-    // Lua used 1000 ft ≈ 305 m.
-    val brakeWarnM = 305.0
+
 
     // If we're farther than the warn radius, turn the marker off but
     // still roll forward prevDistToFastestBP so approach stays meaningful.
-    if (distNowM > brakeWarnM) {
+    if (distNowM > warnDistanceM) {
         return world.copy(
             trackMarker = null,
-            approachingBrakePt = approaching,
             prevDistToFastestBP = distNowM
         )
     }
 
-    // 3. Slice that warn window into 4 buckets (4 = far, 1 = very close).
-    val increments = 4
+    // Trigger the latch when approaching and within corner tolerance of the brake point.
+    if (world.approachingBrakePt && distNowM <= cornerToleranceM) {
+        return world.copy(
+            trackMarker = 0,                           // show 0 now
+            zeroHoldCornerIdx = world.targetCornerIdx  // and hold it until corner changes
+        )
+    }
+
+
+    // 3. Slice that warn window into 6 buckets (6 = far, 1 = very close).
+    val increments = 6
     val raw = distNowM / brakeWarnM * increments
     val marker = kotlin.math.ceil(raw).toInt()
     val clampedMarker = marker.coerceIn(1, increments)
@@ -1037,11 +1045,9 @@ private fun updateTrackMarkerState(
     // 4. Publish.
     return world.copy(
         trackMarker = clampedMarker,
-        approachingBrakePt = approaching,
         prevDistToFastestBP = distNowM
     )
 }
-
 
 //Lua-parity: check_if_at_corner()
 
@@ -1090,7 +1096,7 @@ private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
     val g = longG ?: return DrivePhase.UNKNOWN
     return when {
         g <= -threshold -> DrivePhase.BRAKING
-        g >=  threshold -> DrivePhase.ACCELERATING
+        g >= threshold -> DrivePhase.ACCELERATING
         else -> DrivePhase.COASTING
     }
 }
@@ -1117,9 +1123,9 @@ private fun GArrowBar(
 
         // color by direction
         val barColor = when {
-            clamped > deadband  -> Color(0xFF16A34A) // green
+            clamped > deadband -> Color(0xFF16A34A) // green
             clamped < -deadband -> Color(0xFFDC2626) // red
-            else                -> Color(0xFF9CA3AF) // gray (coast)
+            else -> Color(0xFF9CA3AF) // gray (coast)
         }
 
         // ensure a small visible bar whenever outside deadband
@@ -1290,13 +1296,13 @@ private fun updateBrakePointState(
     val fix = world.currentLatLon ?: return world
 
     val res = updateCandidateBrakePoint(
-        targetCornerIdx      = world.targetCornerIdx,
-        atCorner             = world.atCorner,
-        distToTargetCornerM  = world.distToTargetCornerM,
-        phaseIsBraking       = world.isBrakingNow,
-        brakeZoneDistanceM   = brakeZoneDistanceM,
-        candidateBrakePts    = world.candidateBrakePts,
-        current              = fix
+        targetCornerIdx = world.targetCornerIdx,
+        atCorner = world.atCorner,
+        distToTargetCornerM = world.distToTargetCornerM,
+        phaseIsBraking = world.isBrakingNow,
+        brakeZoneDistanceM = brakeZoneDistanceM,
+        candidateBrakePts = world.candidateBrakePts,
+        current = fix
     )
 
     return if (
@@ -1311,7 +1317,6 @@ private fun updateBrakePointState(
         )
     }
 }
-
 
 
 // If `isPB` is true, promote all candidates → fastest; always clear candidates afterward.
@@ -1360,7 +1365,7 @@ private data class CountdownOut(
     val show: Boolean,
     val secondsInt: Int = 0,
 
-)
+    )
 
 // Pick a color for the distance-based marker (Lua-style).
 // 4,3,2 = green-ish. 1 = orange-ish. null/off = gray.
@@ -1387,7 +1392,7 @@ private fun countdownFrom(tToBrake: Double, warnTimeS: Double): CountdownOut {
 /** Distance from current fix to the FASTEST brake point of the target corner. */
 private fun distToTargetFastestBrakePoint(world: WorldState): Double? {
     val fix = world.currentLatLon ?: return null
-    val bp  = world.fastestBrakePts[world.targetCornerIdx] ?: return null
+    val bp = world.fastestBrakePts[world.targetCornerIdx] ?: return null
     return haversineMeters(fix.lat, fix.lon, bp.lat, bp.lon)
 }
 
@@ -1413,3 +1418,21 @@ private fun WorldState.resetForTrack(track: Track) = copy(
     bestLapMs = null,
     lastSfEnterMs = null
 )
+
+// Computes 'approachingBrakePt' once per tick and updates prevDistToFastestBP.
+// Everyone else should only READ these fields, not write them.
+private fun updateApproachState(world: WorldState): WorldState {
+    val distNowM = distToTargetFastestBrakePoint(world) ?: return world.copy(
+        approachingBrakePt = false
+        // NOTE: do NOT touch prevDistToFastestBP if we don’t have a distance
+    )
+
+    val prev = world.prevDistToFastestBP
+    val epsilonM = 0.5
+    val approaching = prev?.let { distNowM <= it + epsilonM } ?: true
+
+    return world.copy(
+        approachingBrakePt = approaching,
+        prevDistToFastestBP = distNowM
+    )
+}
