@@ -531,7 +531,7 @@ fun RacingScreen() {
             world.value = updateApproachState(world.value)
 
             // 6) Update the Lua-style distance bucket marker
-            world.value = updateTrackMarkerState(world.value, brakeWarnDistanceM, cornerToleranceM)
+            world.value = updateTrackMarkerState(world.value, brakeWarnDistanceM)
 
 
             // 5) Any other per-tick bookkeeping you keep (optional)
@@ -997,57 +997,36 @@ private fun updateCountdownState(
 // Distance-based brake marker, modeled after the Lua "track_marker" logic.
 // This ignores time/speed and just asks: how deep are we inside a fixed
 // warning distance in front of the fastest brake point for the target corner?
+// Distance-based brake marker. Purely reads state; no approach/prevDist writes.
+// Latch to 0 is set in updateApproachState() on approach->leaving transition.
 private fun updateTrackMarkerState(
     world: WorldState,
-    brakeWarnM: Double,
-    cornerToleranceM: Double
+    brakeWarnM: Double
 ): WorldState {
-    // 1. How far are we from the fastest brake point for the current target corner?
-    val distNowM = distToTargetFastestBrakePoint(world)
-        ?: return world.copy(
-            trackMarker = null,
-            // keep whatever the last approach state was
-            approachingBrakePt = world.approachingBrakePt
-        )
-// If we’re latched for the current target corner, keep showing 0.
+
+    // 0) If latched for this corner, always show 0 (persist until corner advances)
     if (world.zeroHoldCornerIdx == world.targetCornerIdx) {
         return world.copy(trackMarker = 0)
     }
 
-    val warnDistanceM = brakeWarnM
+    // 1) Current distance to fastest brake point
+    val distNowM = distToTargetFastestBrakePoint(world)
+        ?: return world.copy(trackMarker = null)
 
-
-
-    // If we're farther than the warn radius, turn the marker off but
-    // still roll forward prevDistToFastestBP so approach stays meaningful.
-    if (distNowM > warnDistanceM) {
-        return world.copy(
-            trackMarker = null,
-            prevDistToFastestBP = distNowM
-        )
+    // 2) Outside warn window? Turn off marker (but DO NOT touch prevDist here)
+    if (distNowM > brakeWarnM) {
+        return world.copy(trackMarker = null)
     }
 
-    // Trigger the latch when approaching and within corner tolerance of the brake point.
-    if (world.approachingBrakePt && distNowM <= cornerToleranceM) {
-        return world.copy(
-            trackMarker = 0,                           // show 0 now
-            zeroHoldCornerIdx = world.targetCornerIdx  // and hold it until corner changes
-        )
-    }
-
-
-    // 3. Slice that warn window into 6 buckets (6 = far, 1 = very close).
+    // 3) Normal 6..1 buckets while inside warn window (and not latched)
     val increments = 6
     val raw = distNowM / brakeWarnM * increments
-    val marker = kotlin.math.ceil(raw).toInt()
-    val clampedMarker = marker.coerceIn(1, increments)
+    val marker = kotlin.math.ceil(raw).toInt().coerceIn(1, increments)
 
-    // 4. Publish.
-    return world.copy(
-        trackMarker = clampedMarker,
-        prevDistToFastestBP = distNowM
-    )
+    // 4) Publish (no prevDist writes here)
+    return world.copy(trackMarker = marker)
 }
+
 
 //Lua-parity: check_if_at_corner()
 
@@ -1422,17 +1401,37 @@ private fun WorldState.resetForTrack(track: Track) = copy(
 // Computes 'approachingBrakePt' once per tick and updates prevDistToFastestBP.
 // Everyone else should only READ these fields, not write them.
 private fun updateApproachState(world: WorldState): WorldState {
-    val distNowM = distToTargetFastestBrakePoint(world) ?: return world.copy(
-        approachingBrakePt = false
-        // NOTE: do NOT touch prevDistToFastestBP if we don’t have a distance
-    )
+    val distNowM = distToTargetFastestBrakePoint(world)
+        ?: return world.copy(
+            approachingBrakePt = false,
+            // do not change prevApproaching / leavingStreak / zeroHoldCornerIdx here
+        )
 
-    val prev = world.prevDistToFastestBP
-    val epsilonM = 0.5
-    val approaching = prev?.let { distNowM <= it + epsilonM } ?: true
+    val prevDist = world.prevDistToFastestBP
+    val epsilonM = 0.5  // small noise margin to avoid flicker
+    val approaching = prevDist?.let { distNowM <= it + epsilonM } ?: true
+
+    // Debounce “leaving” so we don’t false-trigger on one noisy tick
+    val prevApproaching = world.prevApproaching
+    val nowLeaving = !approaching
+    val leavingStreak = when {
+        nowLeaving && (prevApproaching == false || prevApproaching == null) -> world.leavingStreak + 1
+        nowLeaving && prevApproaching == true -> 1
+        else -> 0
+    }
+
+    // Confirmed crossing when we have 2 consecutive "leaving" samples
+    val crossedThisTick = (leavingStreak >= 2)
+
+    // Latch zero ONLY if we just crossed and we haven’t latched this corner yet
+    val alreadyLatchedThisCorner = world.zeroHoldCornerIdx == world.targetCornerIdx
+    val newZeroLatch = if (crossedThisTick && !alreadyLatchedThisCorner) world.targetCornerIdx else world.zeroHoldCornerIdx
 
     return world.copy(
         approachingBrakePt = approaching,
-        prevDistToFastestBP = distNowM
+        prevApproaching = approaching,
+        prevDistToFastestBP = distNowM,
+        leavingStreak = leavingStreak,
+        zeroHoldCornerIdx = newZeroLatch
     )
 }
