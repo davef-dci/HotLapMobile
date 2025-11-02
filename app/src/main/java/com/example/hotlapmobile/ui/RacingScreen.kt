@@ -574,14 +574,17 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
                     CountdownRing(size = 400.dp, strokeDp = 36.dp, color = color)
 
                     // Large numeric marker displayed when approaching and valid
-                    if (approaching && marker != null) {
+                    val marker = world.trackMarker  // Int?
+                    marker?.let {
                         Text(
-                            text = marker.toString(),
+                            text = it.toString(),
                             color = color,
                             fontWeight = FontWeight.Bold,
                             fontSize = 350.sp
                         )
                     }
+
+
 
                     // Longitudinal G-force indicator displayed on the right side of the ring
                     Box(
@@ -988,34 +991,32 @@ private fun updateCountdownState(
 // The latch to zero is set in updateApproachState() during the approach→leaving transition.
 private fun updateTrackMarkerState(
     world: WorldState,
-    brakeWarnM: Double
+    brakeWarnM: Double,
 ): WorldState {
 
-    // If already latched for this corner, keep showing 0 until the target corner advances
-    if (world.zeroHoldCornerIdx == world.targetCornerIdx) {
-        return world.copy(trackMarker = 0)
-    }
-
-    // Get the current distance to the fastest brake point
     val distNowM = distToTargetFastestBrakePoint(world)
         ?: return world.copy(trackMarker = null)
 
-    // If we're outside the warning window, turn off the marker
-    // (but do not modify previous-distance state here)
+    // 1) If outside warning, nothing is shown.
     if (distNowM > brakeWarnM) {
         return world.copy(trackMarker = null)
     }
 
-    // Compute a 6–1 bucket value representing distance remaining within the warning zone
+    // 2) If we’re leaving and this corner is latched, show 0 (still in warning).
+    val leaving = !world.approachingBrakePt
+    val latchedThisCorner = (world.zeroHoldCornerIdx == world.targetCornerIdx)
+    if (leaving && latchedThisCorner) {
+        return world.copy(trackMarker = 0)
+    }
+
+    // 3) Otherwise, we’re approaching inside warning → 6..1
     val increments = 6
     val raw = distNowM / brakeWarnM * increments
     val marker = kotlin.math.ceil(raw).toInt().coerceIn(1, increments)
 
-    // Publish the new marker value (no previous-distance updates here)
     return world.copy(trackMarker = marker)
 }
 
-// Lua parity reference: check_if_at_corner()
 
 
 private fun checkIfAtCornerLua(
