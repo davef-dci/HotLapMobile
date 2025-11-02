@@ -76,6 +76,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.hotlapmobile.data.SettingsRepo
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import android.util.Log
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
@@ -392,6 +400,8 @@ fun RacingScreen() {
     val brakeWarnDistanceM = globalSettings.brakeWarnDistanceM
 
 
+
+
     if (selectedTrack == null) {
         // Optional: simple loading stub
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -425,6 +435,8 @@ fun RacingScreen() {
     val brakeThreshG = prefsRepo.brakeThreshG
         .collectAsStateWithLifecycle(initialValue = 0.20f) // default if unset
         .value
+    // Ensure the loop always sees the latest value even if LaunchedEffect was keyed to Unit
+    val currentThresh by rememberUpdatedState(brakeThreshG)
     var phase by remember { mutableStateOf(DrivePhase.UNKNOWN) }
 
     // start streaming linear acceleration → latest.value.longG
@@ -446,8 +458,15 @@ fun RacingScreen() {
             world.value = checkIfAtStartFinish(latest.value, world.value, track)
             world.value = updateCornerState(latest.value, world.value, track, cornerToleranceM)
 
+            val threshNow = currentThresh         // <-- fresh, not captured
+
+
             // Determine the current driving phase (e.g., braking, accelerating, steady)
-            val phaseNow = detectDrivePhase(latest.value.longG, brakeThreshG)
+            Log.d("PHASE", "longG=${latest.value.longG}, thresh=$threshNow")
+
+            val phaseNow = detectDrivePhase(latest.value.longG, threshNow)
+
+            phase = phaseNow  // keep this live so UI updates
 
             // Refresh the world state with the latest GPS position and braking status
             val fix = latest.value.gps
@@ -601,9 +620,8 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
 /*
  * DebugUi: live debug panel showing internal values.
  *
- * Purpose:
- * - Display internal variables, state flags, and sensor snapshots.
- * - Right now: shows tick count, GPS lat/lon, and GPS sample age.
+ * Shows: track info, ticks/GPS snapshot, start/finish state, lap timing,
+ * drive phase, brake-point targeting, and zero-display marker state.
  */
 @Composable
 private fun DebugUi(
@@ -617,63 +635,98 @@ private fun DebugUi(
     val gps = latest.gps
     val ageMs = gps?.let { android.os.SystemClock.elapsedRealtime() - it.tMillis }
 
-    androidx.compose.foundation.layout.Column(
+    val sectionTitle = @Composable { title: String ->
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+        )
+    }
+
+    val line = @Composable { label: String, value: String ->
+        Text(
+            text = "$label: $value",
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        androidx.compose.material3.Text("DEBUG V1.1", fontSize = 22.sp)
-        Text("Track: ${track.name}  (corners=${track.corners.size})")
-        androidx.compose.material3.Text("Tick: $ticks")
-        androidx.compose.material3.Text("GPS lat: ${gps?.lat}")
-        androidx.compose.material3.Text("GPS lon: ${gps?.lon}")
-        androidx.compose.material3.Text("GPS age ms: ${ageMs ?: "n/a"}")
+        Text("DEBUG V1.3", style = MaterialTheme.typography.headlineSmall)
+        line("Track", "${track.name}  (corners=${track.corners.size})")
+        line("Tick", ticks.toString())
 
+        Divider()
 
-        // start/finish info
-        val dStr = world.distToStartM?.let { String.format("%.1f m", it) } ?: "n/a"
-        androidx.compose.material3.Text("Start/Finish dist: $dStr")
-        androidx.compose.material3.Text("In S/F zone: ${world.inStartZone}")
+        sectionTitle("GPS")
+        line("Lat", gps?.lat?.toString() ?: "—")
+        line("Lon", gps?.lon?.toString() ?: "—")
+        line("Age (ms)", ageMs?.toString() ?: "n/a")
 
-        // lap counter
-        Text("Lap: ${world.lapCount}")
+        Divider()
 
-        // --- NEW: Lap timing ---
-        Text("Current lap: ${formatMs(world.currentLapElapsedMs)}")
-        Text("Best lap:    ${formatMs(world.bestLapMs)}")
+        sectionTitle("Start/Finish")
+        val dSf = world.distToStartM?.let { String.format("%.1f m", it) } ?: "n/a"
+        line("Distance to S/F", dSf)
+        line("In S/F zone", world.inStartZone.toString())
 
+        Divider()
+
+        sectionTitle("Laps")
+        line("Lap #", world.lapCount.toString())
+        line("Current lap", formatMs(world.currentLapElapsedMs))
+        line("Best lap", formatMs(world.bestLapMs))
+
+        Divider()
+
+        sectionTitle("Drive Phase")
+        val longG = latest.longG ?: 0f
         Text(
             text = buildString {
-                append("Phase: ${phase.name}\n")
-                append("Longitudinal accel: ${"%.2f".format(latest.longG ?: 0f)} g\n")
-                append("Threshold: \u00B1${"%.2f".format(brakeThreshG)} g")
+                appendLine("Phase: ${phase.name}")
+                appendLine("Longitudinal accel: ${"%.2f".format(longG)} g")
+                append("Threshold: ±${"%.2f".format(brakeThreshG)} g")
             },
+            style = MaterialTheme.typography.bodyMedium,
             color = Color.Gray,
             fontSize = 16.sp
         )
 
+        Divider()
 
-
-
-        Text(
-            "Fastest brake pt for target? " +
-                    if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no"
+        sectionTitle("Brake Point Targeting")
+        line(
+            "Fastest brake pt for target?",
+            if (world.fastestBrakePts.containsKey(world.targetCornerIdx)) "yes" else "no"
         )
-        Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
+        line("Last capture", world.lastBrakeCaptureNote ?: "—")
+        line("Target corner", (world.targetCornerIdx + 1).toString())
+        line(
+            "Dist to target corner",
+            world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "—"
+        )
+        line("At corner", world.atCorner.toString())
 
-        Text("Target corner: ${world.targetCornerIdx + 1}")
-        Text("Dist to target: ${world.distToTargetCornerM?.let { "%.1f m".format(it) } ?: "--"}")
-        Text("At corner: ${world.atCorner}")
+        val distFast = distToTargetFastestBrakePoint(world)?.let { "%.1f m".format(it) } ?: "—"
+        line("Dist to target brake pt", distFast)
 
-// --- New brake-point debug ---
-        val dFast = distToTargetFastestBrakePoint(world)?.let { "%.1f m".format(it) } ?: "--"
-        Text("Dist to target brake pt: $dFast")
-        Text("Last capture: ${world.lastBrakeCaptureNote ?: "--"}")
+        Divider()
 
-
+        // --- NEW: Brake Marker State (Zero Display Debug) ---
+        sectionTitle("Brake Marker State")
+        line("trackMarker", world.trackMarker?.toString() ?: "—")
+        line("approachingBrakePt", world.approachingBrakePt.toString())
+        line("zeroHoldCornerIdx", world.zeroHoldCornerIdx?.toString() ?: "—")
+        line("prevApproaching", world.prevApproaching?.toString() ?: "—")
+        line("leavingStreak", world.leavingStreak.toString())
     }
 }
+
 
 @Composable
 private fun GReadoutBox(g: Float, modifier: Modifier = Modifier) {
@@ -1007,11 +1060,14 @@ private fun checkIfAtCornerLua(
 }
 
 private fun detectDrivePhase(longG: Float?, threshold: Float): DrivePhase {
-    val g = longG ?: return DrivePhase.UNKNOWN
+ //   val t = if (threshold.isFinite() && threshold > 0f) threshold else 0.1f
+    val t = threshold
+    val g = longG ?: return DrivePhase.COASTING  // default instead of UNKNOWN
+
     return when {
-        g <= -threshold -> DrivePhase.BRAKING
-        g >= threshold -> DrivePhase.ACCELERATING
-        else -> DrivePhase.COASTING
+        g <= -t -> DrivePhase.BRAKING
+        g >=  t -> DrivePhase.ACCELERATING
+        else    -> DrivePhase.COASTING
     }
 }
 

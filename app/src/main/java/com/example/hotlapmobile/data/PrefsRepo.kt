@@ -1,6 +1,7 @@
 package com.example.hotlapmobile.data
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
@@ -20,6 +21,9 @@ class PrefsRepo(private val context: Context) {
     }
 
     suspend fun saveBrakeThresh(valueG: Float) {
+
         context.prefsDataStore.edit { it[Keys.BrakeThresh] = valueG.coerceIn(0.10f, 1.00f) }
+        Log.d("THRESH_SAVE", "Saving brakeThreshG=${valueG}")
+
     }
 }
