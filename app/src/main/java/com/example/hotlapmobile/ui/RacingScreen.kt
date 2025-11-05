@@ -545,11 +545,11 @@ fun RacingScreen() {
             )
 
             1 -> GGUi(
-                //world = world.value,
-                //track = track,
-                //g = latest.value.longG ?: 0f,
-                //latG = latest.value.latG
+                maxAbsG = globalSettings.ggMaxAbsG.toFloat(),
+                latG = latest.value.latG ?: 0f,     // X-axis
+                longG = latest.value.longG ?: 0f    // Y-axis
             )
+
 
             2 -> DebugUi(
                 ticks = ticks,
@@ -686,13 +686,60 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
 
 @Composable
 fun GGUi(
+    maxAbsG: Float,
+    latG: Float,
+    longG: Float,
     modifier: Modifier = Modifier
 ) {
-    // TODO: draw your G-G plot here
-    Box(modifier.fillMaxSize()) {
-        Text("G-G Plot (GGUi) — coming soon", modifier = Modifier.padding(16.dp))
+    Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+
+        // HUD: show scale + current g's
+        Column(
+            Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 12.dp)) {
+            Text("G-G scale: ±${"%.3f".format(maxAbsG)} g")
+            Text("lat: ${"%.3f".format(latG)} g   long: ${"%.3f".format(longG)} g")
+        }
+
+        Canvas(Modifier.size(320.dp)) {
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val radius = size.minDimension * 0.45f
+
+            // Static background
+            drawCircle(Color.LightGray, radius, Offset(cx, cy), style = Stroke(3f))
+            drawLine(Color.LightGray, Offset(cx - radius, cy), Offset(cx + radius, cy), 2f)
+            drawLine(Color.LightGray, Offset(cx, cy - radius), Offset(cx, cy + radius), 2f)
+
+            // Mapper: ±maxAbsG -> ±radius
+            fun toPx(g: Float) = (g / maxAbsG) * radius
+
+            // Desired (unclamped) pixel position
+            val px = toPx(latG)
+            val py = toPx(longG)
+            var x = cx + px
+            var y = cy - py
+
+            // Clamp to circle edge so saturation is visible at the rim
+            val dx = x - cx
+            val dy = y - cy
+            val dist = kotlin.math.sqrt(dx*dx + dy*dy)
+            if (dist > radius && dist > 0f) {
+                val scale = radius / dist
+                x = cx + dx * scale
+                y = cy + dy * scale
+            }
+
+            // Draw the dot
+            drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = Offset(x, y))
+        }
     }
 }
+
+
+
 
 /*
  * DebugUi: live debug panel showing internal values.

@@ -53,6 +53,9 @@ class SettingsRepo(private val context: Context) {
             prefs[Keys.cornerTolM] = newVals.cornerToleranceM
             prefs[Keys.brakeZoneM] = newVals.brakeZoneDistanceM
             prefs[Keys.brakeWarnM] = newVals.brakeWarnDistanceM
+
+            prefs[Keys.ggMaxAbsG]  = newVals.ggMaxAbsG
+            prefs[Keys.ggTrailSec] = newVals.ggTrailSeconds
         }
     }
 

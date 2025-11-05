@@ -15,6 +15,12 @@ import com.example.hotlapmobile.data.SettingsRepo
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import android.util.Log
+import android.widget.Toast
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.rememberCoroutineScope
+
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,8 +54,26 @@ fun SettingsScreen(
         cornerTolText = globalSettings.cornerToleranceM.toString()
         brakeZoneText = globalSettings.brakeZoneDistanceM.toString()
         brakeWarnText = globalSettings.brakeWarnDistanceM.toString()
+
+        // these lines ensure the text boxes show the current value:
+        ggMaxAbsGText  = globalSettings.ggMaxAbsG.toString()
+        ggTrailSecText = globalSettings.ggTrailSeconds.toString()
     }
 
+
+
+
+    //
+    fun parseDoubleFlexible(txt: String, fallback: Double): Double {
+        val s = txt.trim().replace(",", ".")
+        if (s.isEmpty()) return fallback
+        val normalized = when {
+            s.startsWith(".")     -> "0$s"
+            s.startsWith("-.")    -> "-0${s.drop(1)}"
+            else                  -> s
+        }
+        return normalized.toDoubleOrNull() ?: fallback
+    }
 
     // simple parse helpers
     fun toDoubleOr(old: Double, txt: String): Double {
@@ -118,51 +142,92 @@ fun SettingsScreen(
             Text("G-G Plot", style = MaterialTheme.typography.titleMedium)
 
             OutlinedTextField(
-                value = ggMaxAbsGText,
+                value = ggMaxAbsGText,                       // <-- shows current saved value
                 onValueChange = { ggMaxAbsGText = it },
                 label = { Text("G-G max scale (G)") },
-                supportingText = { Text("Circle radius — typical 1.0–3.0 G") },
+                placeholder = { Text("%.2f".format(globalSettings.ggMaxAbsG)) }, // optional hint
+                supportingText = { Text("Circle radius — e.g., 1.0 to 3.0 G") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 
             OutlinedTextField(
-                value = ggTrailSecText,
+                value = ggTrailSecText,                      // <-- shows current saved value
                 onValueChange = { ggTrailSecText = it },
                 label = { Text("G-G trail window (s)") },
+                placeholder = { Text("%.1f".format(globalSettings.ggTrailSeconds)) }, // optional
                 supportingText = { Text("Points fade out over this duration") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 
 
-            Button(
-                onClick = {
-                    // When the user taps Save:
-                    val newCornerTol   = toDoubleOr(globalSettings.cornerToleranceM, cornerTolText)
-                    val newBrakeZone   = toDoubleOr(globalSettings.brakeZoneDistanceM, brakeZoneText)
-                    val newBrakeWarn   = toDoubleOr(globalSettings.brakeWarnDistanceM, brakeWarnText)
 
-                    // NEW: parse + clamp to sensible ranges
-                    val newGgMaxAbsG  = toDoubleOr(globalSettings.ggMaxAbsG, ggMaxAbsGText).coerceIn(0.5, 5.0)
-                    val newGgTrailSec = toDoubleOr(globalSettings.ggTrailSeconds, ggTrailSecText).coerceIn(0.2, 20.0)
+                    Button(
+                        onClick = {
+                            val newCornerTol   = toDoubleOr(globalSettings.cornerToleranceM, cornerTolText)
+                            val newBrakeZone   = toDoubleOr(globalSettings.brakeZoneDistanceM, brakeZoneText)
+                            val newBrakeWarn   = toDoubleOr(globalSettings.brakeWarnDistanceM, brakeWarnText)
 
-                    scope.launch {
-                        settingsRepo.updateAll(
-                            com.example.hotlapmobile.config.GlobalSettings(
-                                cornerToleranceM   = newCornerTol,
-                                brakeZoneDistanceM = newBrakeZone,
-                                brakeWarnDistanceM = newBrakeWarn,
-                                ggMaxAbsG          = newGgMaxAbsG,     // NEW
-                                ggTrailSeconds     = newGgTrailSec     // NEW
-                            )
-                        )
+                            // DEBUG: log the raw text BEFORE parsing
+                            Log.d("SETTINGS", "RAW ggMaxAbsGText='${ggMaxAbsGText}', ggTrailSecText='${ggTrailSecText}'")
+
+                            // Use flexible parsing for the G-G inputs
+                            //val newGgMaxAbsG  = parseDoubleFlexible(ggMaxAbsGText,  globalSettings.ggMaxAbsG).coerceIn(0.5, 5.0)
+                           // val newGgTrailSec = parseDoubleFlexible(ggTrailSecText, globalSettings.ggTrailSeconds).coerceIn(0.2, 20.0)
+                            val newGgMaxAbsG  = 0.5
+                            val newGgTrailSec = 3.0
+
+                            scope.launch {
+                                try {
+                                    // 1) Write all values
+
+
+                                    settingsRepo.updateAll(
+                                        com.example.hotlapmobile.config.GlobalSettings(
+                                            cornerToleranceM   = newCornerTol,
+                                            brakeZoneDistanceM = newBrakeZone,
+                                            brakeWarnDistanceM = newBrakeWarn,
+                                            ggMaxAbsG          = newGgMaxAbsG,
+                                            ggTrailSeconds     = newGgTrailSec
+                                        )
+
+
+                                    )
+
+                                    // 2) Read back the latest snapshot from DataStore
+                                    val echo = settingsRepo.settings.first()
+
+                                    // 3) Log + toast what’s ACTUALLY stored now
+                                    Log.d("SETTINGS",
+                                        "Echo after save -> cornerTol=${echo.cornerToleranceM}, " +
+                                                "ggMaxAbsG=${echo.ggMaxAbsG}, ggTrailSeconds=${echo.ggTrailSeconds}"
+                                    )
+                                    Toast.makeText(
+                                        context,
+                                        "Saved. Echo: G-G max ${"%.2f".format(echo.ggMaxAbsG)} | trail ${"%.1f".format(echo.ggTrailSeconds)}s",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+
+                                    // 4) Update the text boxes to the echoed values so you *see* them stick
+                                    cornerTolText = echo.cornerToleranceM.toString()
+                                    brakeZoneText = echo.brakeZoneDistanceM.toString()
+                                    brakeWarnText = echo.brakeWarnDistanceM.toString()
+                                    ggMaxAbsGText = echo.ggMaxAbsG.toString()
+                                    ggTrailSecText = echo.ggTrailSeconds.toString()
+
+                                } catch (t: Throwable) {
+                                    Log.e("SETTINGS", "Save failed", t)
+                                    Toast.makeText(context, "Save failed: ${t.message}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Save")
                     }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Save")
-            }
+
+
 
             // Show what's currently active (after save this will change because Flow updates)
             Card(
@@ -179,6 +244,9 @@ fun SettingsScreen(
                     Text("Corner tolerance: ${"%.1f".format(globalSettings.cornerToleranceM)} m")
                     Text("Brake zone distance: ${"%.1f".format(globalSettings.brakeZoneDistanceM)} m")
                     Text("Brake warn distance: ${"%.1f".format(globalSettings.brakeWarnDistanceM)} m")
+                    Text("G-G max scale: ${"%.2f".format(globalSettings.ggMaxAbsG)} G")
+                    Text("G-G trail: ${"%.1f".format(globalSettings.ggTrailSeconds)} s")
+
                 }
             }
         }
