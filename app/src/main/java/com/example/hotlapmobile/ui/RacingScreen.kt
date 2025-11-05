@@ -122,6 +122,39 @@ private fun computeLateralG(
 private const val COUNTDOWN_HOLD_MS: Long = 2000L
 
 
+@Composable
+private fun SegmentedCountdownRing(
+    segmentsColored: Int,            // 4..0
+    size: Dp = 400.dp,
+    strokeDp: Dp = 36.dp,
+    activeColor: Color,
+    inactiveColor: Color = Color(0xFF9CA3AF) // gray
+) {
+    Canvas(Modifier.size(size)) {
+        val stroke = strokeDp.toPx()
+        val diameter = size.toPx()
+        val arcSize = Size(diameter - stroke, diameter - stroke)
+        val topLeft = Offset(stroke / 2, stroke / 2)
+
+        // Draw 4 segments: 0–90, 90–180, 180–270, 270–360 (clockwise)
+        // Segment i is colored if i < segmentsColored, else gray.
+        repeat(4) { i ->
+            val start = i * 90f
+            val color = if (i < segmentsColored) activeColor else inactiveColor
+            drawArc(
+                color = color,
+                startAngle = start,
+                sweepAngle = 90f,
+                useCenter = false,
+                style = Stroke(width = stroke, cap = StrokeCap.Butt),
+                topLeft = topLeft,
+                size = arcSize
+            )
+        }
+    }
+}
+
+
 // STEP: Always-on circular ring composable (outline-only, fixed pixel conversion)
 @Composable
 private fun CountdownRing(
@@ -337,6 +370,7 @@ data class WorldState(
     val countdownHoldUntilMs: Long? = null,
 
     val trackMarker: Int? = null,          // 6..1 when approaching brake point, null when off
+    val markerQuarter: Int? = null,        // 4..0 segments colored for the current marker
     val approachingBrakePt: Boolean = false,
     val zeroHoldCornerIdx: Int? = null,  // NEW: latch “0” until we rotate to the next corner
     val prevApproaching: Boolean? = null,        // last tick’s approaching flag
@@ -571,7 +605,30 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
                 Box(contentAlignment = Alignment.Center) {
 
                     // Outer countdown ring showing approach intensity
-                    CountdownRing(size = 400.dp, strokeDp = 36.dp, color = color)
+                    //CountdownRing(size = 400.dp, strokeDp = 36.dp, color = color)
+
+                    val colored = world.markerQuarter ?: 0
+                    val color = markerColor(marker)
+
+// Segmented ring
+                    SegmentedCountdownRing(
+                        segmentsColored = colored,
+                        size = 400.dp,
+                        strokeDp = 36.dp,
+                        activeColor = color
+                    )
+
+// Big numeric marker on top
+                    marker?.let {
+                        Text(
+                            text = it.toString(),
+                            color = color,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 350.sp
+                        )
+                    }
+
+
 
                     // Large numeric marker displayed when approaching and valid
                     val marker = world.trackMarker  // Int?
@@ -995,26 +1052,38 @@ private fun updateTrackMarkerState(
 ): WorldState {
 
     val distNowM = distToTargetFastestBrakePoint(world)
-        ?: return world.copy(trackMarker = null)
+        ?: return world.copy(trackMarker = null, markerQuarter = null)
 
     // 1) If outside warning, nothing is shown.
     if (distNowM > brakeWarnM) {
-        return world.copy(trackMarker = null)
+        return world.copy(trackMarker = null, markerQuarter = null)
     }
 
     // 2) If we’re leaving and this corner is latched, show 0 (still in warning).
     val leaving = !world.approachingBrakePt
     val latchedThisCorner = (world.zeroHoldCornerIdx == world.targetCornerIdx)
     if (leaving && latchedThisCorner) {
-        return world.copy(trackMarker = 0)
+        return world.copy(trackMarker = 0, markerQuarter = 0)
     }
 
     // 3) Otherwise, we’re approaching inside warning → 6..1
     val increments = 6
+    val frac = (distNowM / brakeWarnM).coerceIn(0.0, 1.0) // 1 = far edge, 0 = at BP
+
     val raw = distNowM / brakeWarnM * increments
     val marker = kotlin.math.ceil(raw).toInt().coerceIn(1, increments)
 
-    return world.copy(trackMarker = marker)
+    // Progress INSIDE the current marker band (0 at band start → 1 at band end)
+    val bandSize = 1.0 / increments
+    val bandStart = (marker - 1) * bandSize
+    val localProgress = ((bandStart + bandSize) - frac) / bandSize
+    // localProgress: 0, .25, .50, .75, 1.00 → quarter steps
+
+    // Colored segments remaining (4..0), graying 1→4 clockwise as progress grows
+    val coloredSegments = (4 - kotlin.math.floor(localProgress * 4.0)).toInt()
+        .coerceIn(0, 4)
+
+    return world.copy(trackMarker = marker, markerQuarter = coloredSegments)
 }
 
 
