@@ -530,7 +530,7 @@ fun RacingScreen() {
 
 
     // ---- UI: two pages
-    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
 
     HorizontalPager(
         state = pagerState,
@@ -544,7 +544,14 @@ fun RacingScreen() {
                 latG = latest.value.latG
             )
 
-            1 -> DebugUi(
+            1 -> GGUi(
+                //world = world.value,
+                //track = track,
+                //g = latest.value.longG ?: 0f,
+                //latG = latest.value.latG
+            )
+
+            2 -> DebugUi(
                 ticks = ticks,
                 latest = latest.value,
                 world = world.value,
@@ -676,6 +683,16 @@ private fun RacingUi(world: WorldState, track: Track, g: Float, latG: Float? = n
     }
 }
 
+
+@Composable
+fun GGUi(
+    modifier: Modifier = Modifier
+) {
+    // TODO: draw your G-G plot here
+    Box(modifier.fillMaxSize()) {
+        Text("G-G Plot (GGUi) — coming soon", modifier = Modifier.padding(16.dp))
+    }
+}
 
 /*
  * DebugUi: live debug panel showing internal values.
@@ -1494,3 +1511,5 @@ private fun updateApproachState(world: WorldState): WorldState {
         zeroHoldCornerIdx = newZeroLatch
     )
 }
+
+
