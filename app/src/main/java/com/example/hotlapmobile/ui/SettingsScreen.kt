@@ -38,6 +38,10 @@ fun SettingsScreen(
     var brakeZoneText  by rememberSaveable { mutableStateOf("") }
     var brakeWarnText  by rememberSaveable { mutableStateOf("") }
 
+    // for GG plot
+    var ggMaxAbsGText  by rememberSaveable { mutableStateOf("") }
+    var ggTrailSecText by rememberSaveable { mutableStateOf("") }
+
 // Whenever globalSettings changes (on save or when screen re-enters),
 // update the text fields to reflect the latest active values.
     LaunchedEffect(globalSettings) {
@@ -110,6 +114,28 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             )
 
+            Divider()
+            Text("G-G Plot", style = MaterialTheme.typography.titleMedium)
+
+            OutlinedTextField(
+                value = ggMaxAbsGText,
+                onValueChange = { ggMaxAbsGText = it },
+                label = { Text("G-G max scale (G)") },
+                supportingText = { Text("Circle radius — typical 1.0–3.0 G") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            OutlinedTextField(
+                value = ggTrailSecText,
+                onValueChange = { ggTrailSecText = it },
+                label = { Text("G-G trail window (s)") },
+                supportingText = { Text("Points fade out over this duration") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+
             Button(
                 onClick = {
                     // When the user taps Save:
@@ -117,12 +143,18 @@ fun SettingsScreen(
                     val newBrakeZone   = toDoubleOr(globalSettings.brakeZoneDistanceM, brakeZoneText)
                     val newBrakeWarn   = toDoubleOr(globalSettings.brakeWarnDistanceM, brakeWarnText)
 
+                    // NEW: parse + clamp to sensible ranges
+                    val newGgMaxAbsG  = toDoubleOr(globalSettings.ggMaxAbsG, ggMaxAbsGText).coerceIn(0.5, 5.0)
+                    val newGgTrailSec = toDoubleOr(globalSettings.ggTrailSeconds, ggTrailSecText).coerceIn(0.2, 20.0)
+
                     scope.launch {
                         settingsRepo.updateAll(
                             com.example.hotlapmobile.config.GlobalSettings(
                                 cornerToleranceM   = newCornerTol,
                                 brakeZoneDistanceM = newBrakeZone,
-                                brakeWarnDistanceM = newBrakeWarn
+                                brakeWarnDistanceM = newBrakeWarn,
+                                ggMaxAbsG          = newGgMaxAbsG,     // NEW
+                                ggTrailSeconds     = newGgTrailSec     // NEW
                             )
                         )
                     }

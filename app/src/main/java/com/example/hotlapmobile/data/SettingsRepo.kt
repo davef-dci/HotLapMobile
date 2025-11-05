@@ -20,6 +20,10 @@ class SettingsRepo(private val context: Context) {
         val cornerTolM      = doublePreferencesKey("corner_tolerance_m")
         val brakeZoneM      = doublePreferencesKey("brake_zone_distance_m")
         val brakeWarnM      = doublePreferencesKey("brake_warn_distance_m")
+
+        // G-G plot settings
+        val ggMaxAbsG    = doublePreferencesKey("gg_max_abs_g")       // e.g., 1.5
+        val ggTrailSec   = doublePreferencesKey("gg_trail_seconds")   // e.g., 3.0
     }
 
     /**
@@ -33,6 +37,10 @@ class SettingsRepo(private val context: Context) {
             cornerToleranceM    = prefs[Keys.cornerTolM] ?: def.cornerToleranceM,
             brakeZoneDistanceM  = prefs[Keys.brakeZoneM] ?: def.brakeZoneDistanceM,
             brakeWarnDistanceM  = prefs[Keys.brakeWarnM] ?: def.brakeWarnDistanceM,
+            // NEW: use persisted value if present, otherwise default
+            ggMaxAbsG           = prefs[Keys.ggMaxAbsG] ?: def.ggMaxAbsG,
+            ggTrailSeconds      = prefs[Keys.ggTrailSec] ?: def.ggTrailSeconds
+
         )
     }
 

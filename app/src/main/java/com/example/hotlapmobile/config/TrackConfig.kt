@@ -5,7 +5,11 @@ data class LatLon(val lat: Double, val lon: Double)
 data class GlobalSettings(
     val cornerToleranceM: Double,
     val brakeZoneDistanceM: Double,
-    val brakeWarnDistanceM: Double
+    val brakeWarnDistanceM: Double,
+
+    val ggMaxAbsG: Double = 1.5,
+    val ggTrailSeconds: Double = 3.0
+
 )
 
 // these are our current built-in defaults
