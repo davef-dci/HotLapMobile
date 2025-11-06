@@ -547,7 +547,9 @@ fun RacingScreen() {
             1 -> GGUi(
                 maxAbsG = globalSettings.ggMaxAbsG.toFloat(),
                 latG = latest.value.latG ?: 0f,     // X-axis
-                longG = latest.value.longG ?: 0f    // Y-axis
+                longG = latest.value.longG ?: 0f,   // Y-axis
+                trailSeconds = globalSettings.ggTrailSeconds.toFloat(), // NEW
+                ticks = ticks                                           // NEW (sample @ 10 Hz)
             )
 
 
@@ -689,8 +691,32 @@ fun GGUi(
     maxAbsG: Float,
     latG: Float,
     longG: Float,
+    trailSeconds: Float,
+    ticks: Long,
     modifier: Modifier = Modifier
 ) {
+    // Rolling trail of recent samples (lat, long, tMillis)
+    data class TrailPt(val x: Float, val y: Float, val t: Long)
+    val trail = remember { mutableStateListOf<TrailPt>() }
+
+    // Sample once per 10 Hz tick
+    LaunchedEffect(ticks) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        trail.add(TrailPt(latG, longG, now))
+
+        // Prune anything older than the window; also cap size defensively
+        val windowMs = (trailSeconds.coerceAtLeast(0.2f) * 1000f).toLong()
+        val cutoff = now - windowMs
+
+
+
+
+        while (trail.isNotEmpty() && trail.first().t < cutoff) trail.removeAt(0)
+        if (trail.size > 400) { // hard cap ~40s at 10 Hz, just in case
+            trail.removeRange(0, trail.size - 400)
+        }
+    }
+
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
 
         // HUD: show scale + current g's
@@ -698,9 +724,11 @@ fun GGUi(
             Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 12.dp)) {
+                .padding(top = 12.dp)
+        ) {
             Text("G-G scale: ±${"%.3f".format(maxAbsG)} g")
             Text("lat: ${"%.3f".format(latG)} g   long: ${"%.3f".format(longG)} g")
+            Text("trail: ${"%.1f".format(trailSeconds)} s")
         }
 
         Canvas(Modifier.size(320.dp)) {
@@ -708,32 +736,99 @@ fun GGUi(
             val cy = size.height / 2f
             val radius = size.minDimension * 0.45f
 
-            // Static background
+            // Static axes
             drawCircle(Color.LightGray, radius, Offset(cx, cy), style = Stroke(3f))
             drawLine(Color.LightGray, Offset(cx - radius, cy), Offset(cx + radius, cy), 2f)
             drawLine(Color.LightGray, Offset(cx, cy - radius), Offset(cx, cy + radius), 2f)
 
-            // Mapper: ±maxAbsG -> ±radius
             fun toPx(g: Float) = (g / maxAbsG) * radius
 
-            // Desired (unclamped) pixel position
-            val px = toPx(latG)
-            val py = toPx(longG)
-            var x = cx + px
-            var y = cy - py
-
-            // Clamp to circle edge so saturation is visible at the rim
-            val dx = x - cx
-            val dy = y - cy
-            val dist = kotlin.math.sqrt(dx*dx + dy*dy)
-            if (dist > radius && dist > 0f) {
-                val scale = radius / dist
-                x = cx + dx * scale
-                y = cy + dy * scale
+            // Helper to clamp a point to the circle edge (preserves saturation cue)
+            fun clampToCircle(xIn: Float, yIn: Float): Offset {
+                var x = xIn
+                var y = yIn
+                val dx = x - cx
+                val dy = y - cy
+                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (dist > radius && dist > 0f) {
+                    val s = radius / dist
+                    x = cx + dx * s
+                    y = cy + dy * s
+                }
+                return Offset(x, y)
             }
 
-            // Draw the dot
-            drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = Offset(x, y))
+
+// --- NEW: render fading line segments between trail points (oldest → newest)
+            val now = android.os.SystemClock.elapsedRealtime()
+            val windowMs = (trailSeconds.coerceAtLeast(0.2f) * 1000f).toLong()
+
+            if (trail.isNotEmpty()) {
+                data class RenderPt(val p: Offset, val alpha: Float)
+                val renders = buildList<RenderPt> {
+                    for (pt in trail) {
+                        val age = (now - pt.t).coerceAtLeast(0)
+                        val frac = 1f - (age.toFloat() / windowMs.toFloat()) // 1 → 0 with age
+                        if (frac <= 0f) continue
+                        val alpha = (frac * frac).coerceIn(0f, 1f)
+                        val px = cx + toPx(pt.x)
+                        val py = cy - toPx(pt.y)
+                        val c = clampToCircle(px, py)
+                        add(RenderPt(c, alpha))
+                    }
+                }
+
+                for (i in 1 until renders.size) {
+                    val a = renders[i - 1]
+                    val b = renders[i]
+                    val segAlpha = kotlin.math.min(a.alpha, b.alpha)
+                    if (segAlpha > 0f) {
+                        drawLine(
+                            color = Color(0xFF009688).copy(alpha = segAlpha),
+                            start = a.p,
+                            end = b.p,
+                            strokeWidth = 3f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
+
+
+
+
+
+
+
+            if (trail.isNotEmpty()) {
+                for (pt in trail) {
+                    val age = (now - pt.t).coerceAtLeast(0)
+                    val frac = 1f - (age.toFloat() / windowMs.toFloat()) // 1 → 0
+                    if (frac <= 0f) continue
+                    // ease the fade so older dots get faint smoothly
+                    val alpha = (frac * frac).coerceIn(0f, 1f)
+
+                    // Map to pixels and clamp to rim
+                    val px = cx + toPx(pt.x)
+                    val py = cy - toPx(pt.y)
+                    val c = clampToCircle(px, py)
+
+                    // Slightly smaller radius for trail points
+                    drawCircle(
+                        color = Color(0xFF1E88E5).copy(alpha = alpha),
+                        radius = 4f,
+                        center = c
+                    )
+                }
+            }
+
+            // Draw the current (latest) dot on top, a tad larger/opaque
+            run {
+                val px = cx + toPx(latG)
+                val py = cy - toPx(longG)
+                val c = clampToCircle(px, py)
+                drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = c)
+            }
         }
     }
 }
