@@ -175,8 +175,9 @@ fun SettingsScreen(
                             // Use flexible parsing for the G-G inputs
                             //val newGgMaxAbsG  = parseDoubleFlexible(ggMaxAbsGText,  globalSettings.ggMaxAbsG).coerceIn(0.5, 5.0)
                            // val newGgTrailSec = parseDoubleFlexible(ggTrailSecText, globalSettings.ggTrailSeconds).coerceIn(0.2, 20.0)
-                            val newGgMaxAbsG  = 0.5
-                            val newGgTrailSec = 3.0
+                            val newGgMaxAbsG  = parseDoubleFlexible(ggMaxAbsGText,  globalSettings.ggMaxAbsG).coerceIn(0.125, 2.0)
+                            val newGgTrailSec = parseDoubleFlexible(ggTrailSecText, globalSettings.ggTrailSeconds).coerceIn(0.2, 20.0)
+
 
                             scope.launch {
                                 try {
