@@ -731,10 +731,15 @@ fun GGUi(
             Text("trail: ${"%.1f".format(trailSeconds)} s")
         }
 
-        Canvas(Modifier.size(320.dp)) {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+        )
+        {
             val cx = size.width / 2f
             val cy = size.height / 2f
-            val radius = size.minDimension * 0.45f
+            val radius = size.minDimension * 0.5f
 
             // Static axes
             drawCircle(Color.LightGray, radius, Offset(cx, cy), style = Stroke(3f))
@@ -787,7 +792,7 @@ fun GGUi(
                             color = Color(0xFF009688).copy(alpha = segAlpha),
                             start = a.p,
                             end = b.p,
-                            strokeWidth = 3f,
+                            strokeWidth = 10f,
                             cap = StrokeCap.Round
                         )
                     }
@@ -816,7 +821,7 @@ fun GGUi(
                     // Slightly smaller radius for trail points
                     drawCircle(
                         color = Color(0xFF1E88E5).copy(alpha = alpha),
-                        radius = 4f,
+                        radius = 12f,
                         center = c
                     )
                 }
@@ -827,7 +832,7 @@ fun GGUi(
                 val px = cx + toPx(latG)
                 val py = cy - toPx(longG)
                 val c = clampToCircle(px, py)
-                drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = c)
+                drawCircle(color = Color(0xFF1E88E5), radius = 15f, center = c)
             }
         }
     }
