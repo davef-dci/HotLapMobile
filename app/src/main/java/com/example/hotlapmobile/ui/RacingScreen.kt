@@ -86,6 +86,8 @@ import androidx.compose.ui.unit.sp
 import android.util.Log
 
 
+
+
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
 
 
@@ -549,7 +551,8 @@ fun RacingScreen() {
                 latG = latest.value.latG ?: 0f,     // X-axis
                 longG = latest.value.longG ?: 0f,   // Y-axis
                 trailSeconds = globalSettings.ggTrailSeconds.toFloat(), // NEW
-                ticks = ticks                                           // NEW (sample @ 10 Hz)
+                ticks = ticks,                                           // NEW (sample @ 10 Hz)
+                brakeThreshG = brakeThreshG                             // ← NEW
             )
 
 
@@ -693,6 +696,7 @@ fun GGUi(
     longG: Float,
     trailSeconds: Float,
     ticks: Long,
+    brakeThreshG: Float,
     modifier: Modifier = Modifier
 ) {
     // Rolling trail of recent samples (lat, long, tMillis)
@@ -718,7 +722,44 @@ fun GGUi(
     }
 
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+// ---- BIG READOUT HUD (top-left)
+        val accelColor = phaseColorFor(longG, brakeThreshG)
+        val trPercent = trailBrakingRatio(latG, longG)
 
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Longitudinal Accel (g) — color by braking/accelerating
+            Text(
+                text = "Long Accel: ${"%.2f".format(longG)} g",
+                color = accelColor,
+                fontSize = 44.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Lateral Accel (g) — show value big; keep neutral color (white) for legibility
+            Text(
+                text = "Lat Accel:  ${"%.2f".format(latG)} g",
+                color = Color(0xFF60A5FA),        // bright blue for contrast
+                fontSize = 44.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Trail Braking Ratio (%) — big, neutral; show “—” if undefined
+            Text(
+                text = "Trail Brake %: ${trPercent?.let { "$it%" } ?: "—"}",
+                color = Color(0xFFFACC15),        // bright yellow for readability
+                fontSize = 44.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+
+        /*
         // HUD: show scale + current g's
         Column(
             Modifier
@@ -730,6 +771,8 @@ fun GGUi(
             Text("lat: ${"%.3f".format(latG)} g   long: ${"%.3f".format(longG)} g")
             Text("trail: ${"%.1f".format(trailSeconds)} s")
         }
+
+         */
 
         Canvas(
             Modifier
@@ -789,7 +832,8 @@ fun GGUi(
                     val segAlpha = kotlin.math.min(a.alpha, b.alpha)
                     if (segAlpha > 0f) {
                         drawLine(
-                            color = Color(0xFF009688).copy(alpha = segAlpha),
+                            color = if (b.p.y > cy) Color.Red.copy(alpha = segAlpha) else Color.Green.copy(alpha = segAlpha),
+
                             start = a.p,
                             end = b.p,
                             strokeWidth = 10f,
@@ -1660,3 +1704,24 @@ private fun updateApproachState(world: WorldState): WorldState {
 }
 
 
+@Composable
+private fun phaseColorFor(longG: Float, thresh: Float): Color {
+    return when (detectDrivePhase(longG, thresh)) {
+        DrivePhase.BRAKING       -> Color(0xFFDC2626)  // red
+        DrivePhase.ACCELERATING  -> Color(0xFF16A34A)  // green
+        else                     -> Color(0xFF9CA3AF)  // gray
+    }
+}
+
+/**
+ * Trail Braking Ratio (%):
+ * 0% = all lateral, 100% = all longitudinal (more intuitive “how much is braking”).
+ * Uses magnitudes so sign doesn’t matter.
+ */
+private fun trailBrakingRatio(latG: Float, longG: Float): Int? {
+    val lat = kotlin.math.abs(latG)
+    val lon = kotlin.math.abs(longG)
+    val sum = lat + lon
+    if (sum < 1e-6f) return null
+    return ((lon / sum) * 100f).toInt().coerceIn(0, 100)
+}
