@@ -797,7 +797,8 @@ fun GGUi(
                 .aspectRatio(1f)
         )
         {
-            drawGgRadialsAndLabels()
+            drawGgRadialsAndLabels(latG = latG, longG = longG, brakeThreshG = brakeThreshG)
+
             drawGgLabels()
 
             val cx = size.width / 2f
@@ -1828,8 +1829,11 @@ fun DrawScope.drawGgLabels() {
 
 /** Draw wedge boundaries at 20° and 70° in each quadrant, plus diagonal labels. */
 fun DrawScope.drawGgRadialsAndLabels(
-    windowStartDeg: Float = 20f,   // inner boundary from axis
-    windowEndDeg: Float = 70f,     // outer boundary toward diagonal
+    latG: Float = 0f,
+    longG: Float = 0f,
+    brakeThreshG: Float = 0.2f,
+    windowStartDeg: Float = 20f,
+    windowEndDeg: Float = 70f,
     lineAlpha: Float = 0.30f,
     strokeWidthDp: Float = 1f
 ) {
@@ -1838,6 +1842,12 @@ fun DrawScope.drawGgRadialsAndLabels(
     val cx = w / 2f
     val cy = h / 2f
     val radius = min(w, h) * 0.46f
+    // Determine active region
+    val isBraking = longG < -brakeThreshG
+    val isAccelerating = longG > brakeThreshG
+    val isLeft = latG < -0.05f
+    val isRight = latG > 0.05f
+
 
     // ---- Wedge boundary lines at {20°, 70°} offset from each axis (0, 90, 180, 270)
     val stroke = strokeWidthDp.dp.toPx()
@@ -1845,6 +1855,50 @@ fun DrawScope.drawGgRadialsAndLabels(
 
     val bases = floatArrayOf(0f, 90f, 180f, 270f)
     val offsets = floatArrayOf(windowStartDeg, windowEndDeg)
+
+    val arcTopLeft = Offset(cx - radius, cy - radius)
+    val arcSize    = Size(radius * 2f, radius * 2f)
+
+
+    val bandSweep = (windowEndDeg - windowStartDeg).coerceAtLeast(1f)
+
+    val (shouldHighlight, startDeg, wedgeColor) = when {
+        // Bottom-right (Right→Down): BRAKING + RIGHT
+        isBraking && isRight -> Triple(true,   0f + windowStartDeg, Color(0xFF60A5FA).copy(alpha = 0.65f))
+        // Bottom-left  (Down→Left):  BRAKING + LEFT
+        isBraking && isLeft  -> Triple(true,  90f + windowStartDeg, Color(0xFF60A5FA).copy(alpha = 0.65f))
+        // Top-right    (Up→Right):   ACCEL + RIGHT
+        isAccelerating && isRight -> Triple(true, 270f + windowStartDeg, Color(0xFF34D399).copy(alpha = 0.55f))
+        // Top-left     (Left→Up):    ACCEL + LEFT
+        isAccelerating && isLeft  -> Triple(true, 180f + windowStartDeg, Color(0xFF34D399).copy(alpha = 0.55f))
+        else -> Triple(false, 0f, Color.Transparent)
+
+
+    }
+    Log.d("GG-HILITE", "brake=$isBraking accel=$isAccelerating left=$isLeft right=$isRight long=$longG lat=$latG")
+
+    if (shouldHighlight) {
+        // Filled wedge (bold)
+        drawArc(
+            color = wedgeColor,
+            startAngle = startDeg,
+            sweepAngle = bandSweep,
+            useCenter = true,
+            topLeft = Offset(cx - radius, cy - radius),
+            size = Size(radius * 2f, radius * 2f),
+            style = Fill
+        )
+        // Thin outline so it "pops" against the grid
+        drawArc(
+            color = wedgeColor.copy(alpha = 0.9f),
+            startAngle = startDeg,
+            sweepAngle = bandSweep,
+            useCenter = false,
+            topLeft = Offset(cx - radius, cy - radius),
+            size = Size(radius * 2f, radius * 2f),
+            style = Stroke(width = 4.dp.toPx())
+        )
+    }
 
     for (base in bases) {
         for (off in offsets) {
