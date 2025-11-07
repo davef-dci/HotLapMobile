@@ -1797,13 +1797,13 @@ fun DrawScope.drawGgLabels() {
         // Left side
         canvas.nativeCanvas.save()
         canvas.nativeCanvas.rotate(-90f, 16.sp.toPx() + 8f, cy)
-        canvas.nativeCanvas.drawText("Left", 16.sp.toPx() + 8f, cy, paint)
+        canvas.nativeCanvas.drawText("Pure Left", 16.sp.toPx() + 8f, cy, paint)
         canvas.nativeCanvas.restore()
 
         // Right side
         canvas.nativeCanvas.save()
         canvas.nativeCanvas.rotate(90f, w - (16.sp.toPx() + 8f), cy)
-        canvas.nativeCanvas.drawText("Right", w - (16.sp.toPx() + 8f), cy, paint)
+        canvas.nativeCanvas.drawText("Pure Right", w - (16.sp.toPx() + 8f), cy, paint)
         canvas.nativeCanvas.restore()
 
         // ---- Quadrant labels
@@ -1811,11 +1811,11 @@ fun DrawScope.drawGgLabels() {
         paint.alpha = (255 * faint).roundToInt()
 
         // Upper quadrants (Accelerating + Lateral) = Throttle Steering
-        canvas.nativeCanvas.drawText("Throttle Steering", cx - w*0.25f, cy - h*0.18f, paint) // upper-left
-        canvas.nativeCanvas.drawText("Throttle Steering", cx + w*0.25f, cy - h*0.18f, paint) // upper-right
+        canvas.nativeCanvas.drawText("Throttle Steering", cx - w*0.35f, cy - h*0.25f, paint) // upper-left
+        canvas.nativeCanvas.drawText("Throttle Steering", cx + w*0.35f, cy - h*0.25f, paint) // upper-right
 
         // Lower quadrants (Braking + Lateral) = Trail Braking
-        canvas.nativeCanvas.drawText("Trail Braking", cx - w*0.25f, cy + h*0.22f, paint) // lower-left
-        canvas.nativeCanvas.drawText("Trail Braking", cx + w*0.25f, cy + h*0.22f, paint) // lower-right
+        canvas.nativeCanvas.drawText("Trail Braking", cx - w*0.35f, cy + h*0.25f, paint) // lower-left
+        canvas.nativeCanvas.drawText("Trail Braking", cx + w*0.35f, cy + h*0.25f, paint) // lower-right
     }
 }
