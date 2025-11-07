@@ -86,6 +86,15 @@ import androidx.compose.ui.unit.sp
 import android.util.Log
 
 
+import android.graphics.Paint
+import android.graphics.Typeface
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
+import kotlin.math.*
+
+
 
 
 enum class DrivePhase { BRAKING, COASTING, ACCELERATING, UNKNOWN }
@@ -749,10 +758,18 @@ fun GGUi(
                 fontWeight = FontWeight.Bold
             )
 
-            // Trail Braking Ratio (%) — big, neutral; show “—” if undefined
+            // Display the Trail Braking percentage, rounded to nearest 10 and without decimals.
             Text(
-                text = "Trail Brake %: ${trPercent?.let { "$it%" } ?: "—"}",
-                color = Color(0xFFFACC15),        // bright yellow for readability
+                text = buildString {
+                    append("Trail Brake: ")
+                    val value = trPercent
+                    if (value != null) {
+                        append("${value.roundToInt()}%")
+                    } else {
+                        append("—")
+                    }
+                },
+                color = Color(0xFFFACC15),        // bright yellow
                 fontSize = 44.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -780,6 +797,8 @@ fun GGUi(
                 .aspectRatio(1f)
         )
         {
+            drawGgLabels()
+
             val cx = size.width / 2f
             val cy = size.height / 2f
             val radius = size.minDimension * 0.5f
@@ -1718,10 +1737,85 @@ private fun phaseColorFor(longG: Float, thresh: Float): Color {
  * 0% = all lateral, 100% = all longitudinal (more intuitive “how much is braking”).
  * Uses magnitudes so sign doesn’t matter.
  */
-private fun trailBrakingRatio(latG: Float, longG: Float): Int? {
-    val lat = kotlin.math.abs(latG)
-    val lon = kotlin.math.abs(longG)
-    val sum = lat + lon
-    if (sum < 1e-6f) return null
-    return ((lon / sum) * 100f).toInt().coerceIn(0, 100)
+/**
+ * Trail Braking score based on min/max ratio.
+ * 100% when |lat| == |long(brake)|, → 0% as one dominates.
+ */
+fun trailBrakingRatio(
+    latG: Float,
+    longG: Float,
+    minG: Float = 0.05f,
+    onlyWhenBraking: Boolean = true
+): Float {
+    val lat = abs(latG)
+    val lon = if (onlyWhenBraking) {
+        if (longG < 0f) abs(longG) else 0f
+    } else {
+        abs(longG)
+    }
+
+    val hi = max(lat, lon)
+    val lo = min(lat, lon)
+    if (hi < minG) return 0f
+
+    val ratio = (lo / hi * 100f).coerceIn(0f, 100f)
+    val rounded = (round(ratio / 10f) * 10f)   // nearest 10%
+    return rounded
+}
+
+
+fun DrawScope.drawGgLabels() {
+    val w = size.width
+    val h = size.height
+    val cx = w / 2f
+    val cy = h / 2f
+
+    // Android paint for crisp text
+    val paint = Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.BLUE
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+
+    // Axis label sizes / styles
+    val axisSizePx = 18.sp.toPx()
+    val quadSizePx = 14.sp.toPx()
+    val faint = 0.40f  // opacity for quadrant labels
+    val strong = 0.80f // opacity for axis labels
+
+    drawIntoCanvas { canvas ->
+        // ---- Axis labels (Y: Accelerating/Braking; X: Left/Right)
+        paint.textSize = axisSizePx
+
+        // Y axis: top = Accelerating, bottom = Braking
+        paint.alpha = (255 * strong).roundToInt()
+        canvas.nativeCanvas.drawText("Pure Acceleration", cx, 16.sp.toPx() + 8f, paint)
+        canvas.nativeCanvas.drawText("Pure Braking", cx, h - 8f, paint)
+
+        // X axis: left = Left, right = Right (rotate 90° for side labels)
+        // Left side
+        canvas.nativeCanvas.save()
+        canvas.nativeCanvas.rotate(-90f, 16.sp.toPx() + 8f, cy)
+        canvas.nativeCanvas.drawText("Left", 16.sp.toPx() + 8f, cy, paint)
+        canvas.nativeCanvas.restore()
+
+        // Right side
+        canvas.nativeCanvas.save()
+        canvas.nativeCanvas.rotate(90f, w - (16.sp.toPx() + 8f), cy)
+        canvas.nativeCanvas.drawText("Right", w - (16.sp.toPx() + 8f), cy, paint)
+        canvas.nativeCanvas.restore()
+
+        // ---- Quadrant labels
+        paint.textSize = quadSizePx
+        paint.alpha = (255 * faint).roundToInt()
+
+        // Upper quadrants (Accelerating + Lateral) = Throttle Steering
+        canvas.nativeCanvas.drawText("Throttle Steering", cx - w*0.25f, cy - h*0.18f, paint) // upper-left
+        canvas.nativeCanvas.drawText("Throttle Steering", cx + w*0.25f, cy - h*0.18f, paint) // upper-right
+
+        // Lower quadrants (Braking + Lateral) = Trail Braking
+        canvas.nativeCanvas.drawText("Trail Braking", cx - w*0.25f, cy + h*0.22f, paint) // lower-left
+        canvas.nativeCanvas.drawText("Trail Braking", cx + w*0.25f, cy + h*0.22f, paint) // lower-right
+    }
 }
