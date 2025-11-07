@@ -797,6 +797,7 @@ fun GGUi(
                 .aspectRatio(1f)
         )
         {
+            drawGgRadialsAndLabels()
             drawGgLabels()
 
             val cx = size.width / 2f
@@ -1809,7 +1810,7 @@ fun DrawScope.drawGgLabels() {
         // ---- Quadrant labels
         paint.textSize = quadSizePx
         paint.alpha = (255 * faint).roundToInt()
-
+/*
         // Upper quadrants (Accelerating + Lateral) = Throttle Steering
         canvas.nativeCanvas.drawText("Throttle Steering", cx - w*0.35f, cy - h*0.25f, paint) // upper-left
         canvas.nativeCanvas.drawText("Throttle Steering", cx + w*0.35f, cy - h*0.25f, paint) // upper-right
@@ -1817,5 +1818,76 @@ fun DrawScope.drawGgLabels() {
         // Lower quadrants (Braking + Lateral) = Trail Braking
         canvas.nativeCanvas.drawText("Trail Braking", cx - w*0.35f, cy + h*0.25f, paint) // lower-left
         canvas.nativeCanvas.drawText("Trail Braking", cx + w*0.35f, cy + h*0.25f, paint) // lower-right
+
+
+ */
     }
+}
+
+
+
+/** Draw wedge boundaries at 20° and 70° in each quadrant, plus diagonal labels. */
+fun DrawScope.drawGgRadialsAndLabels(
+    windowStartDeg: Float = 20f,   // inner boundary from axis
+    windowEndDeg: Float = 70f,     // outer boundary toward diagonal
+    lineAlpha: Float = 0.30f,
+    strokeWidthDp: Float = 1f
+) {
+    val w = size.width
+    val h = size.height
+    val cx = w / 2f
+    val cy = h / 2f
+    val radius = min(w, h) * 0.46f
+
+    // ---- Wedge boundary lines at {20°, 70°} offset from each axis (0, 90, 180, 270)
+    val stroke = strokeWidthDp.dp.toPx()
+    val lineColor = Color.Gray.copy(alpha = lineAlpha)
+
+    val bases = floatArrayOf(0f, 90f, 180f, 270f)
+    val offsets = floatArrayOf(windowStartDeg, windowEndDeg)
+
+    for (base in bases) {
+        for (off in offsets) {
+            val deg = base + off
+            val rad = Math.toRadians(deg.toDouble())
+            val x = cx + radius * cos(rad).toFloat()
+            val y = cy - radius * sin(rad).toFloat() // screen Y grows down
+            drawLine(
+                color = lineColor,
+                start = Offset(cx, cy),
+                end = Offset(x, y),
+                strokeWidth = stroke
+            )
+        }
+    }
+
+    // ---- Diagonal labels along 45°/135°/−45°/−135°
+    val paint = Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.GRAY
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        textSize = 18.dp.toPx()
+        alpha = (255 * 0.55f).toInt()
+    }
+
+    fun drawDiagLabel(text: String, angleDeg: Float, rFrac: Float) {
+        val rad = Math.toRadians(angleDeg.toDouble())
+        val px = cx + (radius * rFrac) * cos(rad).toFloat()
+        val py = cy - (radius * rFrac) * sin(rad).toFloat()
+        drawIntoCanvas { canvas ->
+            canvas.nativeCanvas.save()
+            canvas.nativeCanvas.rotate(-angleDeg, px, py)
+            canvas.nativeCanvas.drawText(text, px, py, paint)
+            canvas.nativeCanvas.restore()
+        }
+    }
+
+    val rFrac = 0.72f
+    // Accelerating quadrants
+    drawDiagLabel("Throttle Steering",  45f, rFrac)
+    drawDiagLabel("Throttle Steering", 135f, rFrac)
+    // Braking quadrants
+    drawDiagLabel("Trail Braking",    -45f, rFrac)
+    drawDiagLabel("Trail Braking",   -135f, rFrac)
 }
